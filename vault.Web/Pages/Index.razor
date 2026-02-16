@@ -1,0 +1,638 @@
+@page "/"
+@implements IDisposable
+@using vault.Core.Domain
+@inject IJSRuntime JS
+
+<h1>Apri Vault</h1>
+
+<p class="hint">
+    Questa versione web e separata dalla desktop. Supporta apertura e modifica di vault esistenti
+    (formati legacy/esteso). Il formato ultra non e supportato nel browser.
+</p>
+
+<section class="panel">
+    <div class="row">
+        <label for="vaultFile">File .vault</label>
+        <InputFile id="vaultFile" accept=".vault" OnChange="OnVaultFileSelected" />
+        @if (!string.IsNullOrWhiteSpace(_selectedVaultFileName))
+        {
+            <span class="small">@_selectedVaultFileName</span>
+        }
+    </div>
+
+    <div class="row">
+        <label for="vaultPassword">Password</label>
+        <input id="vaultPassword"
+               type="password"
+               @bind="_password"
+               @bind:event="oninput"
+               placeholder="Password master" />
+    </div>
+
+    <div class="row buttons">
+        <button @onclick="OpenVaultAsync" disabled="@(_isBusy || _selectedVaultFile is null)">Apri vault</button>
+        <button class="secondary" @onclick="CloseVault" disabled="@(_reader is null)">Chiudi vault</button>
+    </div>
+</section>
+
+@if (!string.IsNullOrWhiteSpace(_statusMessage))
+{
+    <div class="@(_hasError ? "status error" : "status ok")">@_statusMessage</div>
+}
+
+@if (_showProgress)
+{
+    <section class="panel progress-panel">
+        <div class="progress-head">
+            <span>@_progressTitle</span>
+            <span>@($"{_progressPercent:0}%")</span>
+        </div>
+        <progress max="100" value="@_progressPercent"></progress>
+    </section>
+}
+
+@if (_reader is not null)
+{
+    <section class="panel">
+        <div class="toolbar">
+            <button class="secondary"
+                    title="Cartella superiore"
+                    @onclick="GoUpFolderAsync"
+                    disabled="@string.IsNullOrWhiteSpace(_currentFolderPath)">
+                Su
+            </button>
+            <span class="path">@GetPathLabel()</span>
+            <span class="dirty @(_reader.IsDirty ? "dirty-yes" : "dirty-no")">
+                @(_reader.IsDirty ? "Modifiche non salvate" : "Nessuna modifica")
+            </span>
+        </div>
+
+        <div class="buttons wrap">
+            <div class="upload-wrap">
+                <label class="file-upload">
+                    <span>Aggiungi file</span>
+                    <InputFile OnChange="OnAddFilesSelected" Multiple />
+                </label>
+            </div>
+            <button class="secondary" @onclick="CreateFolderAsync">Nuova cartella</button>
+            <button class="secondary"
+                    @onclick="SaveVaultAsync"
+                    disabled="@(!_reader.IsDirty || _isBusy)">
+                Salva vault aggiornato
+            </button>
+            <button class="secondary"
+                    @onclick="MoveSelectedItemsAsync"
+                    disabled="@(!HasSelectedItems || _isBusy)">
+                Sposta selezionati
+            </button>
+            <button class="danger"
+                    @onclick="DeleteSelectedItemsAsync"
+                    disabled="@(!HasSelectedItems || _isBusy)">
+                Elimina selezionati
+            </button>
+            <button class="secondary"
+                    @onclick="ClearSelection"
+                    disabled="@(!HasSelectedItems || _isBusy)">
+                Deseleziona
+            </button>
+        </div>
+
+        <table class="items">
+            <thead>
+                <tr>
+                    <th class="col-check">
+                        <input type="checkbox"
+                               checked="@IsAllCurrentSelected()"
+                               @onchange="OnSelectAllChanged"
+                               disabled="@(_currentItems.Count == 0 || _isBusy)" />
+                    </th>
+                    <th>Nome</th>
+                    <th>Tipo</th>
+                    <th>Dimensione</th>
+                    <th>Aggiunto</th>
+                    <th>Azione</th>
+                </tr>
+            </thead>
+            <tbody>
+                @if (_currentItems.Count == 0)
+                {
+                    <tr>
+                        <td colspan="6" class="empty">Cartella vuota.</td>
+                    </tr>
+                }
+                else
+                {
+                    @foreach (var item in _currentItems)
+                    {
+                        <tr>
+                            <td class="col-check">
+                                <input type="checkbox"
+                                       checked="@IsSelected(item.Id)"
+                                       @onchange="@(e => OnItemSelectionChanged(item.Id, e))"
+                                       disabled="@_isBusy" />
+                            </td>
+                            <td>@item.FileName</td>
+                            <td>@item.ItemTypeLabel</td>
+                            <td>@item.SizeLabel</td>
+                            <td>@item.AddedAtLabel</td>
+                            <td>
+                                <div class="row-actions">
+                                    @if (item.IsFolder)
+                                    {
+                                        <button class="secondary" @onclick="() => EnterFolderAsync(item)">Apri</button>
+                                    }
+                                    else
+                                    {
+                                        <button class="secondary" @onclick="() => DownloadFileAsync(item)">Scarica</button>
+                                    }
+                                    <button class="secondary" @onclick="() => RenameItemAsync(item)">Rinomina</button>
+                                    <button class="secondary" @onclick="() => MoveItemAsync(item)">Sposta</button>
+                                    <button class="danger" @onclick="() => DeleteItemAsync(item)">Elimina</button>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    </section>
+}
+
+@code {
+    private const long MaxVaultUploadBytes = 2L * 1024L * 1024L * 1024L;
+    private const long MaxWebFileImportBytes = int.MaxValue - 4096L;
+
+    private IBrowserFile? _selectedVaultFile;
+    private string _selectedVaultFileName = string.Empty;
+    private string _password = string.Empty;
+    private string _statusMessage = string.Empty;
+    private bool _hasError;
+    private bool _isBusy;
+
+    private VaultPortableReader? _reader;
+    private string _currentFolderPath = string.Empty;
+    private IReadOnlyList<VaultFileItem> _currentItems = Array.Empty<VaultFileItem>();
+    private string _openedVaultFileName = "vault.vault";
+    private readonly HashSet<Guid> _selectedItemIds = new();
+    private bool _showProgress;
+    private string _progressTitle = string.Empty;
+    private double _progressPercent;
+    private bool HasSelectedItems => _selectedItemIds.Count > 0;
+
+    private async Task OnVaultFileSelected(InputFileChangeEventArgs args)
+    {
+        _selectedVaultFile = args.FileCount > 0 ? args.File : null;
+        _selectedVaultFileName = _selectedVaultFile?.Name ?? string.Empty;
+
+        _statusMessage = string.Empty;
+        _hasError = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OpenVaultAsync()
+    {
+        if (_selectedVaultFile == null)
+        {
+            SetError("Seleziona prima un file .vault.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_password))
+        {
+            SetError("Inserisci la password.");
+            return;
+        }
+
+        _isBusy = true;
+        _statusMessage = "Apertura vault in corso...";
+        _hasError = false;
+        var openProgress = StartProgress("Apertura vault...");
+
+        try
+        {
+            using var input = _selectedVaultFile.OpenReadStream(MaxVaultUploadBytes);
+            using var ms = new MemoryStream();
+            await input.CopyToAsync(ms);
+
+            byte[] bytes = ms.ToArray();
+
+            _reader?.Dispose();
+            _reader = await Task.Run(() => VaultPortableReader.Open(
+                bytes,
+                _password,
+                allowUltra: false,
+                progress: openProgress));
+            _currentFolderPath = string.Empty;
+            _openedVaultFileName = string.IsNullOrWhiteSpace(_selectedVaultFileName)
+                ? "vault.vault"
+                : _selectedVaultFileName;
+            ClearSelection();
+            RefreshCurrentItems();
+            SetSuccess($"Vault aperto. Formato: {GetStorageFormatLabel(_reader.StorageFormat)}.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Apertura non riuscita: {ex.Message}");
+            _reader?.Dispose();
+            _reader = null;
+            _currentItems = Array.Empty<VaultFileItem>();
+            ClearSelection();
+        }
+        finally
+        {
+            _isBusy = false;
+            _password = string.Empty;
+            StopProgress();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void CloseVault()
+    {
+        _reader?.Dispose();
+        _reader = null;
+        _currentItems = Array.Empty<VaultFileItem>();
+        _currentFolderPath = string.Empty;
+        ClearSelection();
+        StopProgress();
+        _statusMessage = "Vault chiuso.";
+        _hasError = false;
+    }
+
+    private async Task GoUpFolderAsync()
+    {
+        if (_reader == null || string.IsNullOrWhiteSpace(_currentFolderPath))
+            return;
+
+        int idx = _currentFolderPath.LastIndexOf('/');
+        _currentFolderPath = idx < 0 ? string.Empty : _currentFolderPath[..idx];
+        RefreshCurrentItems();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task EnterFolderAsync(VaultFileItem folder)
+    {
+        if (_reader == null || folder == null || !folder.IsFolder)
+            return;
+
+        _currentFolderPath = folder.FullPath;
+        RefreshCurrentItems();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task OnAddFilesSelected(InputFileChangeEventArgs args)
+    {
+        if (_reader == null)
+            return;
+
+        int added = 0;
+        try
+        {
+            foreach (IBrowserFile file in args.GetMultipleFiles())
+            {
+                using var input = file.OpenReadStream(MaxWebFileImportBytes);
+                using var ms = new MemoryStream();
+                await input.CopyToAsync(ms);
+                _reader.AddFile(file.Name, ms.ToArray(), _currentFolderPath);
+                added++;
+            }
+
+            RefreshCurrentItems();
+            SetSuccess($"File aggiunti: {added}");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Aggiunta file non riuscita: {ex.Message}");
+        }
+    }
+
+    private async Task CreateFolderAsync()
+    {
+        if (_reader == null)
+            return;
+
+        string? name = await JS.InvokeAsync<string?>("vaultWeb.prompt", "Nome nuova cartella:", "Nuova cartella");
+        if (string.IsNullOrWhiteSpace(name))
+            return;
+
+        try
+        {
+            _reader.CreateFolder(name, _currentFolderPath);
+            RefreshCurrentItems();
+            SetSuccess("Cartella creata.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Creazione cartella non riuscita: {ex.Message}");
+        }
+    }
+
+    private async Task RenameItemAsync(VaultFileItem item)
+    {
+        if (_reader == null || item == null)
+            return;
+
+        string? newName = await JS.InvokeAsync<string?>("vaultWeb.prompt", "Nuovo nome:", item.FileName);
+        if (string.IsNullOrWhiteSpace(newName))
+            return;
+
+        try
+        {
+            _reader.RenameItem(item.Id, newName);
+            RefreshCurrentItems();
+            SetSuccess("Elemento rinominato.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Rinomina non riuscita: {ex.Message}");
+        }
+    }
+
+    private async Task MoveItemAsync(VaultFileItem item)
+    {
+        if (_reader == null || item == null)
+            return;
+
+        string defaultPath = string.IsNullOrWhiteSpace(item.ParentPath) ? "/" : "/" + item.ParentPath;
+        string? destination = await JS.InvokeAsync<string?>(
+            "vaultWeb.prompt",
+            "Cartella destinazione (usa / per root):",
+            defaultPath);
+
+        if (destination == null)
+            return;
+
+        destination = NormalizeUserPath(destination);
+
+        try
+        {
+            _reader.MoveItems(new[] { item.Id }, destination);
+            EnsureCurrentFolderExists();
+            RefreshCurrentItems();
+            SetSuccess("Elemento spostato.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Spostamento non riuscito: {ex.Message}");
+        }
+    }
+
+    private async Task DeleteItemAsync(VaultFileItem item)
+    {
+        if (_reader == null || item == null)
+            return;
+
+        bool confirmed = await JS.InvokeAsync<bool>(
+            "vaultWeb.confirm",
+            $"Confermi eliminazione di \"{item.FileName}\"?");
+        if (!confirmed)
+            return;
+
+        try
+        {
+            _reader.DeleteItems(new[] { item.Id });
+            EnsureCurrentFolderExists();
+            RefreshCurrentItems();
+            SetSuccess("Elemento eliminato.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Eliminazione non riuscita: {ex.Message}");
+        }
+    }
+
+    private async Task SaveVaultAsync()
+    {
+        if (_reader == null)
+            return;
+
+        _isBusy = true;
+        var saveProgress = StartProgress("Salvataggio vault...");
+        try
+        {
+            byte[] updatedVault = await Task.Run(() => _reader.ExportVaultBytes(saveProgress));
+            using var stream = new MemoryStream(updatedVault);
+            using var streamRef = new DotNetStreamReference(stream);
+            await JS.InvokeVoidAsync("vaultWeb.downloadFileFromStream", _openedVaultFileName, streamRef);
+            SetSuccess("Vault aggiornato scaricato.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Salvataggio non riuscito: {ex.Message}");
+        }
+        finally
+        {
+            _isBusy = false;
+            StopProgress();
+        }
+    }
+
+    private async Task DownloadFileAsync(VaultFileItem file)
+    {
+        if (_reader == null || file == null || file.IsFolder)
+            return;
+
+        try
+        {
+            byte[] content = _reader.ReadFileContent(file.Id);
+            using var stream = new MemoryStream(content);
+            using var streamRef = new DotNetStreamReference(stream);
+            await JS.InvokeVoidAsync("vaultWeb.downloadFileFromStream", file.FileName, streamRef);
+        }
+        catch (Exception ex)
+        {
+            SetError($"Download non riuscito: {ex.Message}");
+        }
+    }
+
+    private string GetPathLabel()
+    {
+        if (string.IsNullOrWhiteSpace(_currentFolderPath))
+            return "/";
+
+        return "/" + _currentFolderPath.Replace('\\', '/');
+    }
+
+    private static string NormalizeUserPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return string.Empty;
+
+        string normalized = path.Trim().Replace('\\', '/');
+        if (normalized == "/")
+            return string.Empty;
+
+        return normalized.Trim('/');
+    }
+
+    private bool IsSelected(Guid itemId) => _selectedItemIds.Contains(itemId);
+
+    private void OnItemSelectionChanged(Guid itemId, ChangeEventArgs args)
+    {
+        bool isChecked = args.Value is bool b
+            ? b
+            : string.Equals(args.Value?.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+
+        if (isChecked)
+            _selectedItemIds.Add(itemId);
+        else
+            _selectedItemIds.Remove(itemId);
+    }
+
+    private bool IsAllCurrentSelected() =>
+        _currentItems.Count > 0 &&
+        _currentItems.All(item => _selectedItemIds.Contains(item.Id));
+
+    private void OnSelectAllChanged(ChangeEventArgs args)
+    {
+        bool selectAll = args.Value is bool b
+            ? b
+            : string.Equals(args.Value?.ToString(), "true", StringComparison.OrdinalIgnoreCase);
+
+        if (selectAll)
+        {
+            foreach (var item in _currentItems)
+                _selectedItemIds.Add(item.Id);
+
+            return;
+        }
+
+        foreach (var item in _currentItems)
+            _selectedItemIds.Remove(item.Id);
+    }
+
+    private void ClearSelection() => _selectedItemIds.Clear();
+
+    private async Task MoveSelectedItemsAsync()
+    {
+        if (_reader == null || _selectedItemIds.Count == 0)
+            return;
+
+        string defaultPath = string.IsNullOrWhiteSpace(_currentFolderPath) ? "/" : "/" + _currentFolderPath;
+        string? destination = await JS.InvokeAsync<string?>(
+            "vaultWeb.prompt",
+            "Cartella destinazione (usa / per root):",
+            defaultPath);
+
+        if (destination == null)
+            return;
+
+        destination = NormalizeUserPath(destination);
+
+        try
+        {
+            _reader.MoveItems(_selectedItemIds.ToArray(), destination);
+            EnsureCurrentFolderExists();
+            RefreshCurrentItems();
+            ClearSelection();
+            SetSuccess("Elementi spostati.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Spostamento non riuscito: {ex.Message}");
+        }
+    }
+
+    private async Task DeleteSelectedItemsAsync()
+    {
+        if (_reader == null || _selectedItemIds.Count == 0)
+            return;
+
+        bool confirmed = await JS.InvokeAsync<bool>(
+            "vaultWeb.confirm",
+            $"Confermi eliminazione di {_selectedItemIds.Count} elementi selezionati?");
+
+        if (!confirmed)
+            return;
+
+        try
+        {
+            _reader.DeleteItems(_selectedItemIds.ToArray());
+            EnsureCurrentFolderExists();
+            RefreshCurrentItems();
+            ClearSelection();
+            SetSuccess("Elementi eliminati.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Eliminazione non riuscita: {ex.Message}");
+        }
+    }
+
+    private IProgress<double> StartProgress(string title)
+    {
+        _progressTitle = title;
+        _progressPercent = 0;
+        _showProgress = true;
+        _ = InvokeAsync(StateHasChanged);
+
+        return new Progress<double>(value =>
+        {
+            _progressPercent = Math.Max(0, Math.Min(100, value));
+            _ = InvokeAsync(StateHasChanged);
+        });
+    }
+
+    private void StopProgress()
+    {
+        _progressTitle = string.Empty;
+        _progressPercent = 0;
+        _showProgress = false;
+    }
+
+    private void EnsureCurrentFolderExists()
+    {
+        if (_reader == null)
+        {
+            _currentFolderPath = string.Empty;
+            return;
+        }
+
+        bool exists = _reader.GetAllFolderPaths().Any(path =>
+            string.Equals(path, _currentFolderPath, StringComparison.OrdinalIgnoreCase));
+
+        if (!exists)
+            _currentFolderPath = string.Empty;
+    }
+
+    private void RefreshCurrentItems()
+    {
+        if (_reader == null)
+        {
+            _currentItems = Array.Empty<VaultFileItem>();
+            return;
+        }
+
+        _currentItems = _reader.GetItemsInFolder(_currentFolderPath);
+
+        var visibleIds = _currentItems.Select(item => item.Id).ToHashSet();
+        _selectedItemIds.RemoveWhere(id => !visibleIds.Contains(id));
+    }
+
+    private static string GetStorageFormatLabel(VaultStorageFormat format) =>
+        format switch
+        {
+            VaultStorageFormat.Legacy => "legacy",
+            VaultStorageFormat.Extended => "esteso",
+            VaultStorageFormat.Ultra => "ultra",
+            _ => format.ToString().ToLowerInvariant()
+        };
+
+    private void SetSuccess(string message)
+    {
+        _statusMessage = message;
+        _hasError = false;
+    }
+
+    private void SetError(string message)
+    {
+        _statusMessage = message;
+        _hasError = true;
+    }
+
+    public void Dispose()
+    {
+        _reader?.Dispose();
+        _reader = null;
+    }
+}
