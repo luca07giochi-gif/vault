@@ -211,9 +211,13 @@
         try
         {
             using var input = _selectedVaultFile.OpenReadStream(MaxVaultUploadBytes);
+            using var buffered = new MemoryStream();
+            await input.CopyToAsync(buffered);
+            buffered.Position = 0;
+
             _reader?.Dispose();
             _reader = await Task.Run(() => VaultPortableReader.Open(
-                input,
+                buffered,
                 _password,
                 allowUltra: false,
                 progress: openProgress));
