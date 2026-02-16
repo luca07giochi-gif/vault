@@ -24,21 +24,14 @@ namespace vault.Core.Crypto
                     VaultText.T("core.crypto.vaultTooLargeForEncryption"));
             }
 
-            byte[] ciphertext = new byte[plaintext.Length];
-            byte[] tag = new byte[TagSize];
+            byte[] result = new byte[plaintext.Length + TagSize];
+            Span<byte> ciphertext = result.AsSpan(0, plaintext.Length);
+            Span<byte> tag = result.AsSpan(plaintext.Length, TagSize);
 
             using (var aes = new AesGcm(key, TagSize))
             {
                 aes.Encrypt(nonce, plaintext, ciphertext, tag, aad);
             }
-
-            // ciphertext || tag
-            byte[] result = new byte[ciphertext.Length + tag.Length];
-            Buffer.BlockCopy(ciphertext, 0, result, 0, ciphertext.Length);
-            Buffer.BlockCopy(tag, 0, result, ciphertext.Length, tag.Length);
-
-            CryptographicOperations.ZeroMemory(ciphertext);
-            CryptographicOperations.ZeroMemory(tag);
 
             return result;
         }
@@ -59,27 +52,16 @@ namespace vault.Core.Crypto
 
             int cipherLen = cipherAndTag.Length - TagSize;
 
-            byte[] ciphertext = new byte[cipherLen];
-            byte[] tag = new byte[TagSize];
             byte[] plaintext = new byte[cipherLen];
+            ReadOnlySpan<byte> ciphertext = cipherAndTag.AsSpan(0, cipherLen);
+            ReadOnlySpan<byte> tag = cipherAndTag.AsSpan(cipherLen, TagSize);
 
-            Buffer.BlockCopy(cipherAndTag, 0, ciphertext, 0, cipherLen);
-            Buffer.BlockCopy(cipherAndTag, cipherLen, tag, 0, TagSize);
-
-            try
+            using (var aes = new AesGcm(key, TagSize))
             {
-                using (var aes = new AesGcm(key, TagSize))
-                {
-                    aes.Decrypt(nonce, ciphertext, tag, plaintext, aad);
-                }
+                aes.Decrypt(nonce, ciphertext, tag, plaintext, aad);
+            }
 
-                return plaintext;
-            }
-            finally
-            {
-                CryptographicOperations.ZeroMemory(ciphertext);
-                CryptographicOperations.ZeroMemory(tag);
-            }
+            return plaintext;
         }
     }
 }

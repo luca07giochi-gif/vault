@@ -211,14 +211,9 @@
         try
         {
             using var input = _selectedVaultFile.OpenReadStream(MaxVaultUploadBytes);
-            using var ms = new MemoryStream();
-            await input.CopyToAsync(ms);
-
-            byte[] bytes = ms.ToArray();
-
             _reader?.Dispose();
             _reader = await Task.Run(() => VaultPortableReader.Open(
-                bytes,
+                input,
                 _password,
                 allowUltra: false,
                 progress: openProgress));
@@ -229,6 +224,14 @@
             ClearSelection();
             RefreshCurrentItems();
             SetSuccess($"Vault aperto. Formato: {GetStorageFormatLabel(_reader.StorageFormat)}.");
+        }
+        catch (OutOfMemoryException)
+        {
+            SetError("Apertura non riuscita: memoria browser insufficiente per questo vault. Prova da desktop oppure con un vault piu piccolo.");
+            _reader?.Dispose();
+            _reader = null;
+            _currentItems = Array.Empty<VaultFileItem>();
+            ClearSelection();
         }
         catch (Exception ex)
         {

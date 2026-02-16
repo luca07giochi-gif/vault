@@ -351,16 +351,34 @@ namespace vault.Core.Domain
             if (vaultBytes == null)
                 throw new ArgumentNullException(nameof(vaultBytes));
 
-            if (vaultBytes.Length < VaultFileFormat.HEADER_SIZE)
-                throw new InvalidDataException(VaultText.T("core.format.fileTooShort"));
+            using var ms = new MemoryStream(vaultBytes, writable: false);
+            return Open(ms, password, allowUltra, progress);
+        }
+
+        public static VaultPortableReader Open(
+            Stream vaultStream,
+            string password,
+            bool allowUltra = false,
+            IProgress<double>? progress = null)
+        {
+            if (vaultStream == null)
+                throw new ArgumentNullException(nameof(vaultStream));
+            if (!vaultStream.CanRead)
+                throw new InvalidOperationException(VaultText.T("core.format.sourceNotReadable"));
 
             if (string.IsNullOrWhiteSpace(password))
                 throw new CryptographicException(VaultText.T("core.error.passwordWrong"));
 
+            if (vaultStream.CanSeek)
+            {
+                vaultStream.Position = 0;
+                if (vaultStream.Length < VaultFileFormat.HEADER_SIZE)
+                    throw new InvalidDataException(VaultText.T("core.format.fileTooShort"));
+            }
+
             ReportProgress(progress, 2);
 
-            byte[] headerBytes = new byte[VaultFileFormat.HEADER_SIZE];
-            Buffer.BlockCopy(vaultBytes, 0, headerBytes, 0, headerBytes.Length);
+            byte[] headerBytes = ReadExactly(vaultStream, VaultFileFormat.HEADER_SIZE, VaultText.T("core.format.headerIncomplete"));
             var header = VaultFileFormat.ReadHeaderFromBytes(headerBytes);
             ReportProgress(progress, 8);
 
@@ -383,8 +401,8 @@ namespace vault.Core.Domain
 
                 VaultContent content = format switch
                 {
-                    VaultStorageFormat.Legacy => ReadLegacy(vaultBytes, header, sessionKey, progress),
-                    VaultStorageFormat.Ultra or VaultStorageFormat.Extended => ReadStreaming(vaultBytes, header, sessionKey, progress),
+                    VaultStorageFormat.Legacy => ReadLegacy(vaultStream, header, sessionKey, progress),
+                    VaultStorageFormat.Ultra or VaultStorageFormat.Extended => ReadStreaming(vaultStream, header, sessionKey, progress),
                     _ => throw new InvalidDataException(VaultText.T("core.error.unsupportedVaultVersion"))
                 };
 
@@ -472,17 +490,15 @@ namespace vault.Core.Domain
         }
 
         private static VaultContent ReadLegacy(
-            byte[] vaultBytes,
+            Stream vaultStream,
             VaultFileFormat.Header header,
             byte[] sessionKey,
             IProgress<double>? progress)
         {
-            int encryptedLength = vaultBytes.Length - VaultFileFormat.HEADER_SIZE;
-            if (encryptedLength <= 0)
+            byte[] encryptedPayload = ReadToEnd(vaultStream);
+            if (encryptedPayload.Length <= 0)
                 throw new InvalidDataException(VaultText.T("core.format.payloadMissing"));
 
-            byte[] encryptedPayload = new byte[encryptedLength];
-            Buffer.BlockCopy(vaultBytes, VaultFileFormat.HEADER_SIZE, encryptedPayload, 0, encryptedLength);
             ReportProgress(progress, 38);
 
             byte[] aad = VaultFileFormat.SerializeHeaderForAad(header);
@@ -505,17 +521,40 @@ namespace vault.Core.Domain
         }
 
         private static VaultContent ReadStreaming(
-            byte[] vaultBytes,
+            Stream vaultStream,
             VaultFileFormat.Header header,
             byte[] sessionKey,
             IProgress<double>? progress)
         {
-            using var ms = new MemoryStream(vaultBytes, writable: false);
-            ms.Position = VaultFileFormat.HEADER_SIZE;
-
-            using Stream decryptedPayload = VaultFileFormat.CreateStreamingDecryptingReadStream(ms, sessionKey, header);
+            using Stream decryptedPayload = VaultFileFormat.CreateStreamingDecryptingReadStream(vaultStream, sessionKey, header);
             var deserializeProgress = CreateScaledProgress(progress, 20, 98);
             return VaultSerializer.Deserialize(decryptedPayload, deserializeProgress);
+        }
+
+        private static byte[] ReadExactly(Stream input, int length, string errorMessage)
+        {
+            if (length < 0)
+                throw new ArgumentOutOfRangeException(nameof(length));
+
+            var buffer = new byte[length];
+            int offset = 0;
+            while (offset < length)
+            {
+                int read = input.Read(buffer, offset, length - offset);
+                if (read <= 0)
+                    throw new InvalidDataException(errorMessage);
+
+                offset += read;
+            }
+
+            return buffer;
+        }
+
+        private static byte[] ReadToEnd(Stream input)
+        {
+            using var ms = new MemoryStream();
+            input.CopyTo(ms);
+            return ms.ToArray();
         }
 
         private sealed class FilePayload
