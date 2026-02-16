@@ -97,64 +97,105 @@
             </button>
         </div>
 
-        <table class="items">
-            <thead>
-                <tr>
-                    <th class="col-check">
-                        <input type="checkbox"
-                               checked="@IsAllCurrentSelected()"
-                               @onchange="OnSelectAllChanged"
-                               disabled="@(_currentItems.Count == 0 || _isBusy)" />
-                    </th>
-                    <th>Nome</th>
-                    <th>Tipo</th>
-                    <th>Dimensione</th>
-                    <th>Aggiunto</th>
-                    <th>Azione</th>
-                </tr>
-            </thead>
-            <tbody>
-                @if (_currentItems.Count == 0)
-                {
+        <div class="@GetCurrentFolderDropCssClass()"
+             @ondragover="OnCurrentFolderDragOver"
+             @ondragover:preventDefault
+             @ondrop="OnCurrentFolderDropAsync"
+             @ondrop:preventDefault>
+            <table class="items">
+                <thead>
                     <tr>
-                        <td colspan="6" class="empty">Cartella vuota.</td>
+                        <th class="col-check">
+                            <input type="checkbox"
+                                   checked="@IsAllCurrentSelected()"
+                                   @onchange="OnSelectAllChanged"
+                                   disabled="@(_currentItems.Count == 0 || _isBusy)" />
+                        </th>
+                        <th>Nome</th>
+                        <th>Tipo</th>
+                        <th>Dimensione</th>
+                        <th>Aggiunto</th>
+                        <th>Azione</th>
                     </tr>
-                }
-                else
-                {
-                    @foreach (var item in _currentItems)
+                </thead>
+                <tbody>
+                    @if (_currentItems.Count == 0)
                     {
                         <tr>
-                            <td class="col-check">
-                                <input type="checkbox"
-                                       checked="@IsSelected(item.Id)"
-                                       @onchange="@(e => OnItemSelectionChanged(item.Id, e))"
-                                       disabled="@_isBusy" />
-                            </td>
-                            <td>@item.FileName</td>
-                            <td>@item.ItemTypeLabel</td>
-                            <td>@item.SizeLabel</td>
-                            <td>@item.AddedAtLabel</td>
-                            <td>
-                                <div class="row-actions">
-                                    @if (item.IsFolder)
-                                    {
-                                        <button class="secondary" @onclick="() => EnterFolderAsync(item)">Apri</button>
-                                    }
-                                    else
-                                    {
-                                        <button class="secondary" @onclick="() => DownloadFileAsync(item)">Scarica</button>
-                                    }
-                                    <button class="secondary" @onclick="() => RenameItemAsync(item)">Rinomina</button>
-                                    <button class="secondary" @onclick="() => MoveItemAsync(item)">Sposta</button>
-                                    <button class="danger" @onclick="() => DeleteItemAsync(item)">Elimina</button>
-                                </div>
-                            </td>
+                            <td colspan="6" class="empty">Cartella vuota.</td>
                         </tr>
                     }
-                }
-            </tbody>
-        </table>
+                    else
+                    {
+                        @foreach (var item in _currentItems)
+                        {
+                            <tr class="@GetRowCssClass(item)"
+                                draggable="@(!_isBusy)"
+                                @ondragstart="(e => OnItemDragStart(item, e))"
+                                @ondragend="OnItemDragEnd"
+                                @ondragover="(e => OnFolderDragOver(item, e))"
+                                @ondragover:preventDefault="@item.IsFolder"
+                                @ondragover:stopPropagation="@item.IsFolder"
+                                @ondrop="(e => OnFolderDropAsync(item, e))"
+                                @ondrop:preventDefault="@item.IsFolder"
+                                @ondrop:stopPropagation="@item.IsFolder">
+                                <td class="col-check">
+                                    <input type="checkbox"
+                                           checked="@IsSelected(item.Id)"
+                                           @onchange="@(e => OnItemSelectionChanged(item.Id, e))"
+                                           disabled="@_isBusy" />
+                                </td>
+                                <td>@item.FileName</td>
+                                <td>@item.ItemTypeLabel</td>
+                                <td>@item.SizeLabel</td>
+                                <td>@item.AddedAtLabel</td>
+                                <td>
+                                    <div class="row-actions">
+                                        @if (item.IsFolder)
+                                        {
+                                            <button class="secondary" @onclick="() => EnterFolderAsync(item)">Apri</button>
+                                        }
+                                        else
+                                        {
+                                            <button class="secondary"
+                                                    title="@GetOpenButtonTitle(item)"
+                                                    @onclick="() => OpenFileInBrowserAsync(item)"
+                                                    disabled="@(!CanPreviewInBrowser(item))">
+                                                Apri
+                                            </button>
+                                            <button class="secondary" @onclick="() => DownloadFileAsync(item)">Scarica</button>
+                                        }
+                                        <button class="secondary" @onclick="() => RenameItemAsync(item)">Rinomina</button>
+                                        <button class="secondary" @onclick="() => MoveItemAsync(item)">Sposta</button>
+                                        <button class="danger" @onclick="() => DeleteItemAsync(item)">Elimina</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (_showMoveDialog)
+        {
+            <section class="panel move-panel">
+                <div class="move-head">@_moveDialogTitle</div>
+                <div class="row">
+                    <label for="moveDestination">Cartella destinazione</label>
+                    <select id="moveDestination" @bind="_moveDialogDestinationPath" disabled="@_isBusy">
+                        @foreach (var path in GetMoveDestinationPaths())
+                        {
+                            <option value="@path">@GetFolderPathLabel(path)</option>
+                        }
+                    </select>
+                </div>
+                <div class="buttons">
+                    <button class="secondary" @onclick="CancelMoveDialog" disabled="@_isBusy">Annulla</button>
+                    <button @onclick="ConfirmMoveDialogAsync" disabled="@_isBusy">Conferma spostamento</button>
+                </div>
+            </section>
+        }
     </section>
 }
 
@@ -174,10 +215,45 @@
     private IReadOnlyList<VaultFileItem> _currentItems = Array.Empty<VaultFileItem>();
     private string _openedVaultFileName = "vault.vault";
     private readonly HashSet<Guid> _selectedItemIds = new();
+    private readonly HashSet<Guid> _dragItemIds = new();
+    private string _dragOverFolderPath = string.Empty;
+    private bool _dragOverCurrentFolder;
+
+    private bool _showMoveDialog;
+    private List<Guid> _moveDialogItemIds = new();
+    private string _moveDialogDestinationPath = string.Empty;
+    private string _moveDialogTitle = string.Empty;
+
     private bool _showProgress;
     private string _progressTitle = string.Empty;
     private double _progressPercent;
     private bool HasSelectedItems => _selectedItemIds.Count > 0;
+
+    private static readonly Dictionary<string, string> PreviewContentTypeByExtension =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            [".pdf"] = "application/pdf",
+            [".png"] = "image/png",
+            [".jpg"] = "image/jpeg",
+            [".jpeg"] = "image/jpeg",
+            [".gif"] = "image/gif",
+            [".bmp"] = "image/bmp",
+            [".webp"] = "image/webp",
+            [".svg"] = "image/svg+xml",
+            [".mp4"] = "video/mp4",
+            [".webm"] = "video/webm",
+            [".ogg"] = "video/ogg",
+            [".mov"] = "video/quicktime",
+            [".m4v"] = "video/x-m4v",
+            [".mp3"] = "audio/mpeg",
+            [".wav"] = "audio/wav",
+            [".txt"] = "text/plain",
+            [".csv"] = "text/csv",
+            [".json"] = "application/json",
+            [".xml"] = "application/xml",
+            [".html"] = "text/html",
+            [".htm"] = "text/html"
+        };
 
     private async Task OnVaultFileSelected(InputFileChangeEventArgs args)
     {
@@ -261,6 +337,8 @@
         _currentItems = Array.Empty<VaultFileItem>();
         _currentFolderPath = string.Empty;
         ClearSelection();
+        CancelMoveDialog();
+        ResetDragState();
         StopProgress();
         _statusMessage = "Vault chiuso.";
         _hasError = false;
@@ -355,33 +433,17 @@
         }
     }
 
-    private async Task MoveItemAsync(VaultFileItem item)
+    private Task MoveItemAsync(VaultFileItem item)
     {
         if (_reader == null || item == null)
-            return;
+            return Task.CompletedTask;
 
-        string defaultPath = string.IsNullOrWhiteSpace(item.ParentPath) ? "/" : "/" + item.ParentPath;
-        string? destination = await JS.InvokeAsync<string?>(
-            "vaultWeb.prompt",
-            "Cartella destinazione (usa / per root):",
-            defaultPath);
+        OpenMoveDialog(
+            itemIds: new[] { item.Id },
+            destinationPath: item.ParentPath,
+            title: $"Sposta \"{item.FileName}\"");
 
-        if (destination == null)
-            return;
-
-        destination = NormalizeUserPath(destination);
-
-        try
-        {
-            _reader.MoveItems(new[] { item.Id }, destination);
-            EnsureCurrentFolderExists();
-            RefreshCurrentItems();
-            SetSuccess("Elemento spostato.");
-        }
-        catch (Exception ex)
-        {
-            SetError($"Spostamento non riuscito: {ex.Message}");
-        }
+        return Task.CompletedTask;
     }
 
     private async Task DeleteItemAsync(VaultFileItem item)
@@ -452,6 +514,54 @@
         }
     }
 
+    private bool CanPreviewInBrowser(VaultFileItem item)
+    {
+        if (item == null || item.IsFolder)
+            return false;
+
+        string ext = Path.GetExtension(item.FileName) ?? string.Empty;
+        return PreviewContentTypeByExtension.ContainsKey(ext);
+    }
+
+    private string GetOpenButtonTitle(VaultFileItem item) =>
+        CanPreviewInBrowser(item)
+            ? "Apri nel browser"
+            : "Formato non supportato per apertura diretta";
+
+    private async Task OpenFileInBrowserAsync(VaultFileItem file)
+    {
+        if (_reader == null || file == null || file.IsFolder)
+            return;
+
+        if (!TryGetPreviewContentType(file.FileName, out string contentType))
+            return;
+
+        try
+        {
+            byte[] content = _reader.ReadFileContent(file.Id);
+            using var stream = new MemoryStream(content);
+            using var streamRef = new DotNetStreamReference(stream);
+            bool opened = await JS.InvokeAsync<bool>(
+                "vaultWeb.openFileFromStream",
+                file.FileName,
+                contentType,
+                streamRef);
+
+            if (!opened)
+                SetError("Apertura bloccata dal browser. Consenti i popup per questo sito.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Apertura file non riuscita: {ex.Message}");
+        }
+    }
+
+    private static bool TryGetPreviewContentType(string fileName, out string contentType)
+    {
+        string ext = Path.GetExtension(fileName) ?? string.Empty;
+        return PreviewContentTypeByExtension.TryGetValue(ext, out contentType!);
+    }
+
     private string GetPathLabel()
     {
         if (string.IsNullOrWhiteSpace(_currentFolderPath))
@@ -473,6 +583,30 @@
     }
 
     private bool IsSelected(Guid itemId) => _selectedItemIds.Contains(itemId);
+
+    private string GetRowCssClass(VaultFileItem item)
+    {
+        var classes = new List<string>();
+        if (IsSelected(item.Id))
+            classes.Add("row-selected");
+
+        if (item.IsFolder &&
+            _dragItemIds.Count > 0 &&
+            string.Equals(_dragOverFolderPath, item.FullPath, StringComparison.OrdinalIgnoreCase))
+        {
+            classes.Add("row-drop-target");
+        }
+
+        return string.Join(' ', classes);
+    }
+
+    private string GetCurrentFolderDropCssClass()
+    {
+        if (_dragItemIds.Count > 0 && _dragOverCurrentFolder)
+            return "drop-current drop-current-active";
+
+        return "drop-current";
+    }
 
     private void OnItemSelectionChanged(Guid itemId, ChangeEventArgs args)
     {
@@ -510,34 +644,17 @@
 
     private void ClearSelection() => _selectedItemIds.Clear();
 
-    private async Task MoveSelectedItemsAsync()
+    private Task MoveSelectedItemsAsync()
     {
         if (_reader == null || _selectedItemIds.Count == 0)
-            return;
+            return Task.CompletedTask;
 
-        string defaultPath = string.IsNullOrWhiteSpace(_currentFolderPath) ? "/" : "/" + _currentFolderPath;
-        string? destination = await JS.InvokeAsync<string?>(
-            "vaultWeb.prompt",
-            "Cartella destinazione (usa / per root):",
-            defaultPath);
+        OpenMoveDialog(
+            itemIds: _selectedItemIds,
+            destinationPath: _currentFolderPath,
+            title: $"Sposta {_selectedItemIds.Count} elementi");
 
-        if (destination == null)
-            return;
-
-        destination = NormalizeUserPath(destination);
-
-        try
-        {
-            _reader.MoveItems(_selectedItemIds.ToArray(), destination);
-            EnsureCurrentFolderExists();
-            RefreshCurrentItems();
-            ClearSelection();
-            SetSuccess("Elementi spostati.");
-        }
-        catch (Exception ex)
-        {
-            SetError($"Spostamento non riuscito: {ex.Message}");
-        }
+        return Task.CompletedTask;
     }
 
     private async Task DeleteSelectedItemsAsync()
@@ -564,6 +681,155 @@
         {
             SetError($"Eliminazione non riuscita: {ex.Message}");
         }
+    }
+
+    private void OpenMoveDialog(IEnumerable<Guid> itemIds, string? destinationPath, string title)
+    {
+        var ids = itemIds?.Distinct().ToList() ?? new List<Guid>();
+        if (ids.Count == 0)
+            return;
+
+        _moveDialogItemIds = ids;
+        _moveDialogDestinationPath = NormalizeUserPath(destinationPath ?? string.Empty);
+        _moveDialogTitle = string.IsNullOrWhiteSpace(title) ? "Sposta elementi" : title;
+        _showMoveDialog = true;
+    }
+
+    private void CancelMoveDialog()
+    {
+        _showMoveDialog = false;
+        _moveDialogTitle = string.Empty;
+        _moveDialogDestinationPath = string.Empty;
+        _moveDialogItemIds = new List<Guid>();
+    }
+
+    private IReadOnlyList<string> GetMoveDestinationPaths()
+    {
+        if (_reader == null)
+            return Array.Empty<string>();
+
+        return _reader.GetAllFolderPaths();
+    }
+
+    private static string GetFolderPathLabel(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return "/";
+
+        return "/" + path;
+    }
+
+    private async Task ConfirmMoveDialogAsync()
+    {
+        if (_reader == null || !_showMoveDialog || _moveDialogItemIds.Count == 0)
+            return;
+
+        try
+        {
+            _reader.MoveItems(_moveDialogItemIds.ToArray(), _moveDialogDestinationPath);
+            EnsureCurrentFolderExists();
+            RefreshCurrentItems();
+            ClearSelection();
+            SetSuccess(_moveDialogItemIds.Count == 1 ? "Elemento spostato." : "Elementi spostati.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Spostamento non riuscito: {ex.Message}");
+        }
+        finally
+        {
+            CancelMoveDialog();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void OnItemDragStart(VaultFileItem item, DragEventArgs _)
+    {
+        if (_reader == null || _isBusy || item == null)
+            return;
+
+        _dragOverFolderPath = string.Empty;
+        _dragOverCurrentFolder = false;
+
+        if (_selectedItemIds.Count > 0 && _selectedItemIds.Contains(item.Id))
+        {
+            _dragItemIds.Clear();
+            foreach (var id in _selectedItemIds)
+                _dragItemIds.Add(id);
+            return;
+        }
+
+        _dragItemIds.Clear();
+        _dragItemIds.Add(item.Id);
+    }
+
+    private void OnItemDragEnd(DragEventArgs _)
+    {
+        ResetDragState();
+    }
+
+    private void OnFolderDragOver(VaultFileItem item, DragEventArgs _)
+    {
+        if (_isBusy || item == null || !item.IsFolder || _dragItemIds.Count == 0)
+            return;
+
+        _dragOverCurrentFolder = false;
+        _dragOverFolderPath = item.FullPath;
+    }
+
+    private async Task OnFolderDropAsync(VaultFileItem item, DragEventArgs _)
+    {
+        if (_isBusy || item == null || !item.IsFolder || _dragItemIds.Count == 0 || _reader == null)
+            return;
+
+        await MoveDraggedItemsAsync(item.FullPath);
+    }
+
+    private void OnCurrentFolderDragOver(DragEventArgs _)
+    {
+        if (_isBusy || _dragItemIds.Count == 0)
+            return;
+
+        _dragOverFolderPath = string.Empty;
+        _dragOverCurrentFolder = true;
+    }
+
+    private async Task OnCurrentFolderDropAsync(DragEventArgs _)
+    {
+        if (_isBusy || _dragItemIds.Count == 0 || _reader == null)
+            return;
+
+        await MoveDraggedItemsAsync(_currentFolderPath);
+    }
+
+    private async Task MoveDraggedItemsAsync(string destinationFolderPath)
+    {
+        try
+        {
+            _reader!.MoveItems(_dragItemIds.ToArray(), destinationFolderPath);
+            EnsureCurrentFolderExists();
+            RefreshCurrentItems();
+            ClearSelection();
+            SetSuccess(_dragItemIds.Count == 1
+                ? "Elemento spostato con trascinamento."
+                : "Elementi spostati con trascinamento.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Spostamento non riuscito: {ex.Message}");
+        }
+        finally
+        {
+            ResetDragState();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ResetDragState()
+    {
+        _dragItemIds.Clear();
+        _dragOverFolderPath = string.Empty;
+        _dragOverCurrentFolder = false;
     }
 
     private IProgress<double> StartProgress(string title)

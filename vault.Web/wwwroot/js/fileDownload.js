@@ -14,6 +14,22 @@ window.vaultWeb.downloadFileFromStream = async (fileName, contentStreamReference
   URL.revokeObjectURL(url);
 };
 
+window.vaultWeb.openFileFromStream = async (fileName, contentType, contentStreamReference) => {
+  const arrayBuffer = await contentStreamReference.arrayBuffer();
+  const blob = new Blob([arrayBuffer], { type: contentType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+
+  const openedWindow = window.open(url, "_blank", "noopener,noreferrer");
+  if (!openedWindow) {
+    URL.revokeObjectURL(url);
+    return false;
+  }
+
+  // Keep object URL available briefly so the new tab can fully load the resource.
+  window.setTimeout(() => URL.revokeObjectURL(url), 120000);
+  return true;
+};
+
 window.vaultWeb.prompt = (message, defaultValue) => {
   const result = window.prompt(message, defaultValue ?? "");
   return result;

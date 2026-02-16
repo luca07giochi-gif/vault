@@ -202,6 +202,25 @@ button:disabled {
   text-align: center;
 }
 
+.items tr.row-selected td {
+  background: #1c2433;
+}
+
+.items tr.row-drop-target td {
+  background: #203754;
+}
+
+.drop-current {
+  border: 1px dashed transparent;
+  border-radius: 8px;
+  padding: 4px;
+}
+
+.drop-current.drop-current-active {
+  border-color: #5c8ee6;
+  background: #131d2d;
+}
+
 .empty {
   color: #9aa8c2;
   text-align: center;
@@ -237,6 +256,23 @@ button:disabled {
   inset: 0;
   opacity: 0;
   cursor: pointer;
+}
+
+.move-panel {
+  margin-top: 10px;
+}
+
+.move-head {
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.move-panel select {
+  background: #171b23;
+  color: #e7eaf0;
+  border: 1px solid #313848;
+  border-radius: 6px;
+  padding: 8px 10px;
 }
 
 @media (max-width: 760px) {
