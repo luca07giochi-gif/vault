@@ -573,11 +573,13 @@
         _showProgress = true;
         _ = InvokeAsync(StateHasChanged);
 
-        return new Progress<double>(value =>
-        {
-            _progressPercent = Math.Max(0, Math.Min(100, value));
-            _ = InvokeAsync(StateHasChanged);
-        });
+        return new ThrottledUiProgress(
+            report: value =>
+            {
+                _progressPercent = value;
+                _ = InvokeAsync(StateHasChanged);
+            },
+            minIntervalMs: 120);
     }
 
     private void StopProgress()
@@ -641,5 +643,42 @@
     {
         _reader?.Dispose();
         _reader = null;
+    }
+
+    private sealed class ThrottledUiProgress : IProgress<double>
+    {
+        private readonly Action<double> _report;
+        private readonly long _minIntervalMs;
+        private double _lastReported = -1;
+        private long _lastReportAt = Environment.TickCount64;
+
+        public ThrottledUiProgress(Action<double> report, long minIntervalMs)
+        {
+            _report = report ?? throw new ArgumentNullException(nameof(report));
+            _minIntervalMs = Math.Max(16, minIntervalMs);
+        }
+
+        public void Report(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return;
+
+            double clamped = Math.Max(0, Math.Min(100, value));
+            long now = Environment.TickCount64;
+
+            bool isTerminal = clamped >= 100;
+            bool advancedStep = _lastReported < 0 || Math.Abs(clamped - _lastReported) >= 1;
+            bool intervalElapsed = now - _lastReportAt >= _minIntervalMs;
+
+            if (!isTerminal && !advancedStep && !intervalElapsed)
+                return;
+
+            if (!isTerminal && clamped < _lastReported)
+                return;
+
+            _lastReported = clamped;
+            _lastReportAt = now;
+            _report(clamped);
+        }
     }
 }

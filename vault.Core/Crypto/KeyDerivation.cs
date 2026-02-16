@@ -13,6 +13,11 @@ namespace vault.Core.Crypto
             if (salt == null)
                 throw new ArgumentNullException(nameof(salt));
 
+            // "Threads" affects execution strategy, not vault format compatibility.
+            // On WebAssembly/browser environments we often have a single logical CPU
+            // and multithreaded execution may stall or be unsupported.
+            int workerThreads = Math.Clamp(Environment.ProcessorCount, 1, 4);
+
             var config = new Argon2Config
             {
                 Type = Argon2Type.DataIndependentAddressing, // Argon2id
@@ -20,7 +25,7 @@ namespace vault.Core.Crypto
                 TimeCost = 3,
                 MemoryCost = 65536, // 64 MB
                 Lanes = 4,
-                Threads = 4,
+                Threads = workerThreads,
                 Password = password,
                 Salt = salt,
                 HashLength = 32 // AES-256
