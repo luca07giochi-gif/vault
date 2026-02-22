@@ -214,10 +214,12 @@ namespace vault.iOS
 
         private void PresentDocumentPicker(bool allowsMultipleSelection, Action<NSUrl[]> onPicked)
         {
+#pragma warning disable CA1422
             var picker = new UIDocumentPickerViewController(new[] { "public.data" }, UIDocumentPickerMode.Open)
             {
                 AllowsMultipleSelection = allowsMultipleSelection
             };
+#pragma warning restore CA1422
 
             _pickerDelegate = new PickerDelegate(onPicked);
             picker.Delegate = _pickerDelegate;
@@ -697,7 +699,7 @@ namespace vault.iOS
                     ?? new UITableViewCell(UITableViewCellStyle.Subtitle, CellId);
 
                 VaultFileItem item = _owner._visibleItems[indexPath.Row];
-                UIListContentConfiguration content = cell.DefaultContentConfiguration();
+                UIListContentConfiguration content = cell.DefaultContentConfiguration;
                 content.Text = $"{item.IconEmoji}  {item.FileName}";
                 content.SecondaryText = item.IsFolder
                     ? $"Cartella - {item.AddedAtLabel}"
