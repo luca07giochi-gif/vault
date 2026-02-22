@@ -23,7 +23,12 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.100
+          global-json-file: global.json
+
+      - name: Verify .NET SDK
+        run: |
+          dotnet --version
+          dotnet --list-sdks
 
       - name: Install iOS workload
         run: dotnet workload install ios --skip-manifest-update
