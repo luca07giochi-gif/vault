@@ -23,7 +23,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 9.0.100
+          dotnet-version: 8.0.100
 
       - name: Install iOS workload
         run: dotnet workload install ios --skip-manifest-update
@@ -31,11 +31,12 @@ jobs:
       - name: Publish iOS IPA (unsigned)
         run: |
           dotnet publish vault.iOS/vault.iOS.csproj \
-            -f net9.0-ios \
+            -f net8.0-ios \
             -c Release \
             -r ios-arm64 \
             -p:BuildIpa=true \
-            -p:EnableCodeSigning=false
+            -p:EnableCodeSigning=false \
+            -p:CheckEolTargetFramework=false
 
       - name: Locate IPA
         id: locate
