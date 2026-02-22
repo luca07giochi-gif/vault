@@ -37,3 +37,5 @@ Genera artifact `vault-ios-ipa` contenente il file `.ipa`.
 Nota CI: il workflow usa SDK `.NET 8.0.100` e `--skip-manifest-update`
 per restare compatibile con la versione Xcode del runner GitHub.
 Il repository include anche `global.json` per evitare che il runner usi SDK 10.x.
+Inoltre il progetto iOS forza il link dei framework `Security` e `CoreFoundation`
+e disattiva `PublishTrimmed` per evitare errori di linker nella CI.

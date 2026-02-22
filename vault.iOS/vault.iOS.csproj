@@ -17,6 +17,8 @@
     <SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion>
     <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
     <MtouchLink>SdkOnly</MtouchLink>
+    <MtouchExtraArgs>$(MtouchExtraArgs) -framework Security -framework CoreFoundation</MtouchExtraArgs>
+    <PublishTrimmed>false</PublishTrimmed>
     <CheckEolWorkloads>false</CheckEolWorkloads>
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
   </PropertyGroup>
