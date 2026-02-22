@@ -33,3 +33,6 @@ dotnet publish vault.iOS/vault.iOS.csproj -f net9.0-ios -c Release -r ios-arm64 
 Workflow: `.github/workflows/build-ios-ipa.yml`
 
 Genera artifact `vault-ios-ipa` contenente il file `.ipa`.
+
+Nota CI: il workflow usa SDK `.NET 9.0.100` e `--skip-manifest-update`
+per restare compatibile con la versione Xcode del runner GitHub.

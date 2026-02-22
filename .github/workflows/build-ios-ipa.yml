@@ -23,10 +23,10 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 9.0.100
 
       - name: Install iOS workload
-        run: dotnet workload install ios
+        run: dotnet workload install ios --skip-manifest-update
 
       - name: Publish iOS IPA (unsigned)
         run: |
