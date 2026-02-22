@@ -18,7 +18,7 @@
     <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
     <MtouchLink>SdkOnly</MtouchLink>
     <MtouchExtraArgs>$(MtouchExtraArgs) -framework Security -framework CoreFoundation</MtouchExtraArgs>
-    <PublishTrimmed>false</PublishTrimmed>
+    <PublishTrimmed>true</PublishTrimmed>
     <CheckEolWorkloads>false</CheckEolWorkloads>
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
   </PropertyGroup>
