@@ -2,7 +2,7 @@
 ; Build with: iscc installer\cassaforte.iss
 
 #define AppName "Cassaforte"
-#define AppVersion "1.1.0"
+#define AppVersion "1.2.3"
 #define AppPublisher "Luca"
 #define AppExeName "vault.UI.exe"
 #define BuildRoot "..\\artifacts\\publish\\win-x64"
@@ -23,7 +23,7 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 PrivilegesRequired=admin
-SetupIconFile=..\icona.ico
+SetupIconFile=..\\new_icona.ico
 ChangesAssociations=yes
 
 [Languages]
@@ -51,4 +51,6 @@ Root: HKCR; Subkey: "Applications\{#AppExeName}\shell\open\command"; ValueType: 
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Avvia {#AppName}"; Flags: nowait postinstall skipifsilent
+
+
 

@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -24,31 +25,61 @@ namespace vault.UI
     {
         private const string TempOpenPrefix = "vault-open-";
         private const string InternalDragDataFormat = "vault.internal-item-ids";
+        private const int ThumbnailPreviewAutoLimit = 220;
+        private const int ThumbnailWarmupThreshold = 100;
         private const int TempDeleteRetryCount = 720; // 720 * 10s ~= 2 ore
         private static readonly TimeSpan TempDeleteRetryDelay = TimeSpan.FromSeconds(10);
         private static readonly TimeSpan TempOpenFallbackDelay = TimeSpan.FromMinutes(10);
         private static readonly TimeSpan ZipOpenFallbackDelay = TimeSpan.FromHours(12);
+        private static readonly TimeSpan VideoOpenFallbackDelay = TimeSpan.FromHours(3);
         private static readonly TimeSpan AutoVaultLockTimeout = TimeSpan.FromHours(1);
         private const string PreferencesFileName = "ui-preferences.json";
+        private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".m4v", ".mpg", ".mpeg"
+        };
 
         private readonly VaultManager _vaultManager = new VaultManager();
+        private readonly GridView? _listGridView;
         private bool _exportWarningAcknowledged;
         private bool _openWarningAcknowledged;
         private string _currentFolderPath = string.Empty;
         private Point _dragStartPoint;
+        private Guid? _dragStartItemId;
         private bool _isInternalDragRunning;
         private bool _isMarqueeSelecting;
         private bool _mouseDownStartedOnItem;
         private Point _marqueeStartPoint;
+        private readonly HashSet<string> _thumbnailPreviewForceFolders = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _thumbnailPreviewPromptedFolders = new(StringComparer.OrdinalIgnoreCase);
+        private CancellationTokenSource? _thumbnailWarmupCts;
         private readonly DispatcherTimer _autoLockTimer = new DispatcherTimer();
         private DateTime _lastUserActivityUtc = DateTime.UtcNow;
         private readonly string? _startupVaultPath;
         private bool _quickOpenMode;
         private bool _isApplyingLocalization;
+        private SortCriterion _currentSortCriterion = SortCriterion.Name;
+        private bool _sortDescending;
+        private FileViewMode _currentViewMode = FileViewMode.List;
+
+        private enum SortCriterion
+        {
+            Name,
+            Date,
+            Size,
+            Type
+        }
+
+        private enum FileViewMode
+        {
+            List,
+            Thumbnail
+        }
 
         public MainWindow(string? startupVaultPath = null)
         {
             InitializeComponent();
+            _listGridView = ItemsListView.View as GridView;
             _startupVaultPath = NormalizeStartupVaultPath(startupVaultPath);
             _quickOpenMode = !string.IsNullOrWhiteSpace(_startupVaultPath);
 
@@ -71,7 +102,11 @@ namespace vault.UI
             };
             Deactivated += (_, _) => Topmost = false;
 
-            Closed += (_, _) => CleanupOrphanTempOpenFiles(TimeSpan.Zero);
+            Closed += (_, _) =>
+            {
+                CancelThumbnailWarmup();
+                CleanupOrphanTempOpenFiles(TimeSpan.Zero);
+            };
             CleanupOrphanTempOpenFiles(TimeSpan.Zero);
             AggiornaUI();
         }
@@ -133,6 +168,15 @@ namespace vault.UI
 
                 FolderUpButton.ToolTip = T("main.tooltip.folderUp");
                 FolderContentGroupBox.Header = T("main.group.folderContent");
+                SortLabelTextBlock.Text = T("main.label.sort");
+                SortNameItem.Content = T("main.sort.name");
+                SortDateItem.Content = T("main.sort.date");
+                SortSizeItem.Content = T("main.sort.size");
+                SortTypeItem.Content = T("main.sort.type");
+                UpdateSortDirectionButtonText();
+                ViewModeLabelTextBlock.Text = T("main.label.viewMode");
+                ViewModeListItem.Content = T("main.viewMode.list");
+                ViewModeThumbItem.Content = T("main.viewMode.thumb");
 
                 ContextOpenMenuItem.Header = T("main.ctx.open");
                 ContextExportMenuItem.Header = T("main.ctx.export");
@@ -152,13 +196,13 @@ namespace vault.UI
 
                 AddFileButton.Content = T("main.button.addFile");
                 NewFolderButton.Content = T("main.button.newFolder");
-                MoveItemsButton.Content = T("main.button.move");
                 RenameItemButton.Content = T("main.button.rename");
                 RemoveFileButton.Content = T("main.button.remove");
                 ExportFileButton.Content = T("main.button.export");
                 OpenFileButton.Content = T("main.button.open");
                 VaultSettingsButton.Content = T("main.button.settings");
                 CloseVaultButton.Content = T("main.button.closeVault");
+                UpdateMoveButtonLabel();
             }
             finally
             {
@@ -991,12 +1035,30 @@ namespace vault.UI
 
         private void ItemsListView_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
+            if (IsScrollBarInteraction(e.OriginalSource as DependencyObject))
+                return;
+
             _dragStartPoint = e.GetPosition(ItemsListView);
             VaultFileItem? clickedItem = GetItemAtPoint(_dragStartPoint);
+            _dragStartItemId = clickedItem?.Id;
             _mouseDownStartedOnItem = clickedItem != null;
 
             if (_mouseDownStartedOnItem)
             {
+                bool clickedIsAlreadySelected =
+                    clickedItem != null &&
+                    ItemsListView.SelectedItems
+                        .Cast<VaultFileItem>()
+                        .Any(item => item.Id == clickedItem.Id);
+
+                if (clickedIsAlreadySelected &&
+                    ItemsListView.SelectedItems.Count > 1 &&
+                    Keyboard.Modifiers == ModifierKeys.None)
+                {
+                    // Keep the multi-selection while starting a drag from one selected item.
+                    e.Handled = true;
+                }
+
                 HideSelectionMarquee();
                 return;
             }
@@ -1016,11 +1078,25 @@ namespace vault.UI
         private void ItemsListView_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
             _mouseDownStartedOnItem = false;
+            _dragStartItemId = null;
             if (_isMarqueeSelecting)
             {
                 FinishMarqueeSelection();
                 e.Handled = true;
             }
+        }
+
+        private static bool IsScrollBarInteraction(DependencyObject? source)
+        {
+            while (source != null)
+            {
+                if (source is ScrollBar || source is Thumb)
+                    return true;
+
+                source = VisualTreeHelper.GetParent(source);
+            }
+
+            return false;
         }
 
         private void ItemsListView_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
@@ -1038,6 +1114,11 @@ namespace vault.UI
 
             ItemsListView.SelectedItems.Clear();
             ItemsListView.SelectedItem = clickedItem;
+        }
+
+        private void ItemsListView_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            UpdateMoveButtonLabel();
         }
 
         private void ItemsListView_MouseMove(object sender, MouseEventArgs e)
@@ -1072,13 +1153,20 @@ namespace vault.UI
                 return;
             }
 
-            VaultFileItem? startItem = GetItemAtPoint(_dragStartPoint);
+            if (_dragStartItemId == null)
+                return;
+
+            VaultFileItem? startItem = ItemsListView.Items
+                .OfType<VaultFileItem>()
+                .FirstOrDefault(item => item.Id == _dragStartItemId.Value);
             if (startItem == null)
                 return;
 
-            var selected = GetSelectedItems();
-            if (selected.Count == 0 || !selected.Any(s => s.Id == startItem.Id))
-                return;
+            List<VaultFileItem> selected = GetSelectedItems();
+            if (selected.Count == 0)
+                selected = new List<VaultFileItem> { startItem };
+            else if (!selected.Any(s => s.Id == startItem.Id))
+                selected = new List<VaultFileItem> { startItem };
 
             string[] ids = selected.Select(s => s.Id.ToString("D")).ToArray();
             var payload = new DataObject();
@@ -1093,6 +1181,7 @@ namespace vault.UI
             {
                 _isInternalDragRunning = false;
                 _mouseDownStartedOnItem = false;
+                _dragStartItemId = null;
             }
         }
 
@@ -1323,11 +1412,18 @@ namespace vault.UI
 
             if (!open)
             {
+                CancelThumbnailWarmup();
                 ItemsListView.ItemsSource = null;
                 OpenedVaultPathText.Text = string.Empty;
                 RefreshBreadcrumbBar();
                 FolderUpButton.IsEnabled = false;
+                SortModeComboBox.IsEnabled = false;
+                SortDirectionButton.IsEnabled = false;
+                ViewModeComboBox.IsEnabled = false;
                 HideSelectionMarquee();
+                VaultThumbnailConverter.SetPreviewEnabled(true);
+                VaultThumbnailConverter.SetCacheOnlyMode(false);
+                UpdateMoveButtonLabel();
 
                 if (_quickOpenMode && !string.IsNullOrWhiteSpace(_startupVaultPath))
                 {
@@ -1339,6 +1435,9 @@ namespace vault.UI
 
             string openFormatLabel = StorageFormatToLabel(_vaultManager.CurrentVaultStorageFormat ?? VaultStorageFormat.Extended);
             OpenedVaultPathText.Text = Tf("main.msg.openedVaultPath", openFormatLabel, _vaultManager.CurrentVaultPath ?? string.Empty);
+            SortModeComboBox.IsEnabled = true;
+            SortDirectionButton.IsEnabled = true;
+            ViewModeComboBox.IsEnabled = true;
             EnsureCurrentFolderExists();
             RefreshCurrentFolderItems();
         }
@@ -1348,14 +1447,301 @@ namespace vault.UI
             if (!_vaultManager.IsVaultOpen)
                 return;
 
+            CancelThumbnailWarmup();
             EnsureCurrentFolderExists();
 
-            ItemsListView.ItemsSource = _vaultManager.GetItemsInFolder(_currentFolderPath);
+            IReadOnlyList<VaultFileItem> items = _vaultManager.GetItemsInFolder(_currentFolderPath);
+            List<VaultFileItem> sortedItems = SortItems(items).ToList();
+            ItemsListView.ItemsSource = sortedItems;
+            ApplyCurrentViewMode();
+            UpdateThumbnailPreviewPolicy(sortedItems.Count);
             ItemsListView.Items.Refresh();
+            StartThumbnailWarmupIfNeeded(sortedItems);
+            UpdateMoveButtonLabel();
 
             RefreshBreadcrumbBar();
 
             FolderUpButton.IsEnabled = !string.IsNullOrWhiteSpace(_currentFolderPath);
+        }
+
+        private IEnumerable<VaultFileItem> SortItems(IEnumerable<VaultFileItem> items)
+        {
+            IOrderedEnumerable<VaultFileItem> ordered = items
+                .OrderByDescending(item => item.IsFolder);
+
+            return _currentSortCriterion switch
+            {
+                SortCriterion.Date => _sortDescending
+                    ? ordered.ThenByDescending(item => item.AddedTicks).ThenBy(item => item.FileName, StringComparer.CurrentCultureIgnoreCase)
+                    : ordered.ThenBy(item => item.AddedTicks).ThenBy(item => item.FileName, StringComparer.CurrentCultureIgnoreCase),
+
+                SortCriterion.Size => _sortDescending
+                    ? ordered.ThenByDescending(item => item.ContentLength).ThenBy(item => item.FileName, StringComparer.CurrentCultureIgnoreCase)
+                    : ordered.ThenBy(item => item.ContentLength).ThenBy(item => item.FileName, StringComparer.CurrentCultureIgnoreCase),
+
+                SortCriterion.Type => _sortDescending
+                    ? ordered
+                        .ThenByDescending(item => item.IsFolder ? string.Empty : Path.GetExtension(item.FileName), StringComparer.CurrentCultureIgnoreCase)
+                        .ThenByDescending(item => item.FileName, StringComparer.CurrentCultureIgnoreCase)
+                    : ordered
+                        .ThenBy(item => item.IsFolder ? string.Empty : Path.GetExtension(item.FileName), StringComparer.CurrentCultureIgnoreCase)
+                        .ThenBy(item => item.FileName, StringComparer.CurrentCultureIgnoreCase),
+
+                _ => _sortDescending
+                    ? ordered.ThenByDescending(item => item.FileName, StringComparer.CurrentCultureIgnoreCase)
+                    : ordered.ThenBy(item => item.FileName, StringComparer.CurrentCultureIgnoreCase)
+            };
+        }
+
+        private void SortModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            _currentSortCriterion = SelectedSortCriterionFromUi();
+            UpdateSortDirectionButtonText();
+            if (_vaultManager.IsVaultOpen)
+                RefreshCurrentFolderItems();
+        }
+
+        private SortCriterion SelectedSortCriterionFromUi()
+        {
+            if (SortModeComboBox.SelectedItem is not ComboBoxItem selected ||
+                selected.Tag is not string tag)
+            {
+                return SortCriterion.Name;
+            }
+
+            return tag switch
+            {
+                "date" => SortCriterion.Date,
+                "size" => SortCriterion.Size,
+                "type" => SortCriterion.Type,
+                _ => SortCriterion.Name
+            };
+        }
+
+        private void SortDirectionButton_Click(object sender, RoutedEventArgs e)
+        {
+            _sortDescending = !_sortDescending;
+            UpdateSortDirectionButtonText();
+
+            if (_vaultManager.IsVaultOpen)
+                RefreshCurrentFolderItems();
+        }
+
+        private void UpdateSortDirectionButtonText()
+        {
+            if (SortDirectionButton == null)
+                return;
+
+            string key = _sortDescending ? "main.sort.directionDesc" : "main.sort.directionAsc";
+            SortDirectionButton.Content = T(key);
+            SortDirectionButton.ToolTip = T(key);
+        }
+
+        private void UpdateMoveButtonLabel()
+        {
+            if (MoveItemsButton == null)
+                return;
+
+            bool multiSelection = ItemsListView?.SelectedItems.Count >= 2;
+            MoveItemsButton.Content = T(multiSelection ? "main.button.moveAll" : "main.button.move");
+        }
+
+        private void ViewModeComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            CancelThumbnailWarmup();
+            _currentViewMode = SelectedViewModeFromUi();
+            if (ItemsListView == null)
+                return;
+
+            ApplyCurrentViewMode();
+            UpdateThumbnailPreviewPolicy(ItemsListView.Items.Count);
+            ItemsListView.Items.Refresh();
+            StartThumbnailWarmupIfNeeded(ItemsListView.Items.OfType<VaultFileItem>().ToList());
+        }
+
+        private FileViewMode SelectedViewModeFromUi()
+        {
+            if (ViewModeComboBox.SelectedItem is not ComboBoxItem selected ||
+                selected.Tag is not string tag)
+            {
+                return FileViewMode.List;
+            }
+
+            return string.Equals(tag, "thumb", StringComparison.OrdinalIgnoreCase)
+                ? FileViewMode.Thumbnail
+                : FileViewMode.List;
+        }
+
+        private void ApplyCurrentViewMode()
+        {
+            if (ItemsListView == null)
+                return;
+
+            if (_currentViewMode == FileViewMode.Thumbnail)
+            {
+                ItemsListView.View = null;
+                ItemsListView.ItemTemplate = (DataTemplate)FindResource("ThumbnailItemTemplate");
+                ItemsListView.ItemContainerStyle = (Style)FindResource("VaultThumbnailItemStyle");
+                ItemsListView.ItemsPanel = (ItemsPanelTemplate)FindResource("ThumbnailItemsPanelTemplate");
+                ScrollViewer.SetHorizontalScrollBarVisibility(ItemsListView, ScrollBarVisibility.Disabled);
+                ScrollViewer.SetVerticalScrollBarVisibility(ItemsListView, ScrollBarVisibility.Auto);
+                ScrollViewer.SetCanContentScroll(ItemsListView, false);
+                return;
+            }
+
+            ItemsListView.ItemTemplate = null;
+            if (_listGridView != null)
+                ItemsListView.View = _listGridView;
+            ItemsListView.ItemContainerStyle = (Style)FindResource("VaultListItemStyle");
+            ItemsListView.ItemsPanel = (ItemsPanelTemplate)FindResource("ListItemsPanelTemplate");
+            ScrollViewer.SetHorizontalScrollBarVisibility(ItemsListView, ScrollBarVisibility.Auto);
+            ScrollViewer.SetVerticalScrollBarVisibility(ItemsListView, ScrollBarVisibility.Auto);
+            ScrollViewer.SetCanContentScroll(ItemsListView, true);
+        }
+
+        private void UpdateThumbnailPreviewPolicy(int itemCount)
+        {
+            if (_currentViewMode != FileViewMode.Thumbnail)
+            {
+                VaultThumbnailConverter.SetPreviewEnabled(true);
+                return;
+            }
+
+            if (itemCount <= ThumbnailPreviewAutoLimit)
+            {
+                VaultThumbnailConverter.SetPreviewEnabled(true);
+                return;
+            }
+
+            string folderKey = NormalizeFolderPath(_currentFolderPath);
+            if (_thumbnailPreviewForceFolders.Contains(folderKey))
+            {
+                VaultThumbnailConverter.SetPreviewEnabled(true);
+                return;
+            }
+
+            VaultThumbnailConverter.SetPreviewEnabled(false);
+
+            if (_thumbnailPreviewPromptedFolders.Contains(folderKey))
+                return;
+
+            _thumbnailPreviewPromptedFolders.Add(folderKey);
+            MessageBoxResult result = MessageBox.Show(
+                Tf("main.msg.thumbnailManyItemsWarning", itemCount, ThumbnailPreviewAutoLimit),
+                T("main.title.thumbnailManyItems"),
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (result == MessageBoxResult.Yes)
+            {
+                _thumbnailPreviewForceFolders.Add(folderKey);
+                VaultThumbnailConverter.SetPreviewEnabled(true);
+            }
+        }
+
+        private void CancelThumbnailWarmup()
+        {
+            if (_thumbnailWarmupCts == null)
+                return;
+
+            try
+            {
+                _thumbnailWarmupCts.Cancel();
+            }
+            catch
+            {
+                // ignore cancellation race
+            }
+            finally
+            {
+                _thumbnailWarmupCts.Dispose();
+                _thumbnailWarmupCts = null;
+            }
+
+            VaultThumbnailConverter.SetCacheOnlyMode(false);
+        }
+
+        private void StartThumbnailWarmupIfNeeded(IReadOnlyList<VaultFileItem> items)
+        {
+            if (_currentViewMode != FileViewMode.Thumbnail)
+            {
+                VaultThumbnailConverter.SetCacheOnlyMode(false);
+                return;
+            }
+
+            if (!VaultThumbnailConverter.IsPreviewEnabled)
+            {
+                VaultThumbnailConverter.SetCacheOnlyMode(false);
+                return;
+            }
+
+            int previewableCount = VaultThumbnailConverter.CountPreviewable(items);
+            if (previewableCount <= ThumbnailWarmupThreshold)
+            {
+                VaultThumbnailConverter.SetCacheOnlyMode(false);
+                return;
+            }
+
+            var cts = new CancellationTokenSource();
+            _thumbnailWarmupCts = cts;
+            VaultThumbnailConverter.SetCacheOnlyMode(true);
+            _ = WarmupThumbnailsAsync(items, cts);
+        }
+
+        private async Task WarmupThumbnailsAsync(
+            IReadOnlyList<VaultFileItem> items,
+            CancellationTokenSource cts)
+        {
+            try
+            {
+                double lastUiRefreshPercent = -10;
+                IProgress<double> preloadProgress = new Progress<double>(percent =>
+                {
+                    if (percent - lastUiRefreshPercent < 5 && percent < 100)
+                        return;
+
+                    lastUiRefreshPercent = percent;
+                    if (_currentViewMode == FileViewMode.Thumbnail)
+                        ItemsListView.Items.Refresh();
+                });
+
+                await RunLongOperationAsync(
+                    async progress =>
+                    {
+                        var bridgedProgress = new Progress<double>(percent =>
+                        {
+                            progress.Report(percent);
+                            preloadProgress.Report(percent);
+                        });
+
+                        await Task.Run(
+                            () => VaultThumbnailConverter.PreloadThumbnails(items, bridgedProgress, cts.Token),
+                            cts.Token);
+                    },
+                    T("main.progress.loadingThumbnails"),
+                    showDelayMs: 300);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when user changes folder/view during preload.
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Thumbnail warmup error: {ex}");
+            }
+            finally
+            {
+                bool isCurrent = ReferenceEquals(_thumbnailWarmupCts, cts);
+                if (isCurrent)
+                {
+                    _thumbnailWarmupCts = null;
+                    VaultThumbnailConverter.SetCacheOnlyMode(false);
+                    if (_currentViewMode == FileViewMode.Thumbnail)
+                        ItemsListView.Items.Refresh();
+                }
+
+                cts.Dispose();
+            }
         }
 
         private void RefreshBreadcrumbBar()
@@ -1500,10 +1886,15 @@ namespace vault.UI
                 throw new InvalidOperationException(T("main.msg.emptyVaultFile"));
 
             string safeFileName = SanitizeFileName(file.FileName);
+            string extension = Path.GetExtension(safeFileName);
+            if (string.IsNullOrWhiteSpace(extension))
+                extension = ".bin";
+
             string tempDir = Path.Combine(Path.GetTempPath(), $"{TempOpenPrefix}{Guid.NewGuid():N}");
             Directory.CreateDirectory(tempDir);
 
-            string tempPath = Path.Combine(tempDir, safeFileName);
+            // Keep temp path short and stable for better compatibility with media players.
+            string tempPath = Path.Combine(tempDir, $"{Guid.NewGuid():N}{extension}");
             using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
                 foreach (var chunk in file.GetContentChunks())
@@ -1519,19 +1910,7 @@ namespace vault.UI
 
             try
             {
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = tempPath,
-                    UseShellExecute = true,
-                    Verb = "open",
-                    WorkingDirectory = tempDir
-                };
-
-                Process? startedProcess = Process.Start(startInfo);
-                if (startedProcess == null)
-                    throw new InvalidOperationException(T("main.msg.fileLaunchFailed"));
-
-                string extension = Path.GetExtension(safeFileName);
+                Process startedProcess = StartOpenedFileProcess(tempPath, tempDir);
                 _ = CleanupOpenedFileAsync(startedProcess, tempPath, tempDir, extension);
             }
             catch
@@ -1540,6 +1919,64 @@ namespace vault.UI
                 TryDeleteDirectory(tempDir);
                 throw;
             }
+        }
+
+        private Process StartOpenedFileProcess(string tempPath, string tempDir)
+        {
+            var launchErrors = new List<Exception>();
+
+            Process? TryStart(ProcessStartInfo info)
+            {
+                try
+                {
+                    return Process.Start(info);
+                }
+                catch (Exception ex)
+                {
+                    launchErrors.Add(ex);
+                    return null;
+                }
+            }
+
+            Process? started = TryStart(new ProcessStartInfo
+            {
+                FileName = tempPath,
+                UseShellExecute = true,
+                Verb = "open",
+                WorkingDirectory = tempDir
+            });
+
+            if (started == null)
+            {
+                started = TryStart(new ProcessStartInfo
+                {
+                    FileName = tempPath,
+                    UseShellExecute = true,
+                    WorkingDirectory = tempDir
+                });
+            }
+
+            if (started == null)
+            {
+                string escaped = tempPath.Replace("\"", "\"\"");
+                started = TryStart(new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c start \"\" \"{escaped}\"",
+                    WorkingDirectory = tempDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+            }
+
+            if (started != null)
+                return started;
+
+            string details = launchErrors.Count == 0
+                ? string.Empty
+                : $": {string.Join(" | ", launchErrors.Select(e => e.Message))}";
+
+            throw new InvalidOperationException($"{T("main.msg.fileLaunchFailed")}{details}");
         }
 
         private static string SanitizeFileName(string? fileName)
@@ -1559,26 +1996,28 @@ namespace vault.UI
         {
             bool processEnded = false;
             bool fallbackAlreadyElapsed = false;
-            TimeSpan fallbackDelay = extension.Equals(".zip", StringComparison.OrdinalIgnoreCase)
-                ? ZipOpenFallbackDelay
-                : TempOpenFallbackDelay;
+            TimeSpan fallbackDelay = GetOpenFallbackDelay(extension);
+            bool forceDelay = RequiresDeferredCleanup(extension);
 
             try
             {
-                Task waitTask = process.WaitForExitAsync();
-
-                // If shell process exits immediately (common with .zip / explorer), do not trust it.
-                Task firstObservation = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(2)));
-                if (firstObservation != waitTask)
+                if (!forceDelay)
                 {
-                    Task completed = await Task.WhenAny(waitTask, Task.Delay(fallbackDelay));
-                    if (completed == waitTask)
+                    Task waitTask = process.WaitForExitAsync();
+
+                    // If shell process exits immediately, do not trust it for detached apps.
+                    Task firstObservation = await Task.WhenAny(waitTask, Task.Delay(TimeSpan.FromSeconds(2)));
+                    if (firstObservation != waitTask)
                     {
-                        processEnded = true;
-                    }
-                    else
-                    {
-                        fallbackAlreadyElapsed = true;
+                        Task completed = await Task.WhenAny(waitTask, Task.Delay(fallbackDelay));
+                        if (completed == waitTask)
+                        {
+                            processEnded = true;
+                        }
+                        else
+                        {
+                            fallbackAlreadyElapsed = true;
+                        }
                     }
                 }
             }
@@ -1591,7 +2030,7 @@ namespace vault.UI
                 process.Dispose();
             }
 
-            if (!processEnded && !fallbackAlreadyElapsed)
+            if (forceDelay || (!processEnded && !fallbackAlreadyElapsed))
             {
                 // Safety > strict cleanup timing: keep temp file alive a bit longer
                 // to avoid "file not found / moved" while external app opens it.
@@ -1609,6 +2048,29 @@ namespace vault.UI
                 await Task.Delay(TempDeleteRetryDelay);
             }
         }
+
+        private static TimeSpan GetOpenFallbackDelay(string? extension)
+        {
+            if (string.Equals(extension, ".zip", StringComparison.OrdinalIgnoreCase))
+                return ZipOpenFallbackDelay;
+
+            if (IsVideoExtension(extension))
+                return VideoOpenFallbackDelay;
+
+            return TempOpenFallbackDelay;
+        }
+
+        private static bool RequiresDeferredCleanup(string? extension)
+        {
+            if (string.Equals(extension, ".zip", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return IsVideoExtension(extension);
+        }
+
+        private static bool IsVideoExtension(string? extension) =>
+            !string.IsNullOrWhiteSpace(extension) &&
+            VideoExtensions.Contains(extension);
 
         private static bool TrySecureDeleteFile(string filePath)
         {

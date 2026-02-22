@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-ios</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <RootNamespace>vault.iOS</RootNamespace>
+    <AssemblyName>vault.iOS</AssemblyName>
+
+    <ApplicationTitle>Cassaforte iOS</ApplicationTitle>
+    <ApplicationId>com.luca07giochi.vaultios</ApplicationId>
+    <ApplicationDisplayVersion>1.2.3</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+
+    <SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion>
+    <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
+    <MtouchLink>SdkOnly</MtouchLink>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\vault.Core\vault.Core.csproj" />
+  </ItemGroup>
+
+</Project>

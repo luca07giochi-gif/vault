@@ -1,0 +1,58 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/build-ios-ipa.yml"
+      - "vault.iOS/**"
+      - "vault.Core/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install iOS workload
+        run: dotnet workload install ios
+
+      - name: Publish iOS IPA (unsigned)
+        run: |
+          dotnet publish vault.iOS/vault.iOS.csproj \
+            -f net8.0-ios \
+            -c Release \
+            -r ios-arm64 \
+            -p:BuildIpa=true \
+            -p:EnableCodeSigning=false
+
+      - name: Locate IPA
+        id: locate
+        shell: bash
+        run: |
+          IPA_PATH=$(find vault.iOS/bin/Release -type f -name "*.ipa" | head -n 1)
+          if [ -z "$IPA_PATH" ]; then
+            echo "IPA non trovata."
+            find vault.iOS/bin/Release -maxdepth 6 -type f | sed 's/^/ - /'
+            exit 1
+          fi
+          echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
+          echo "IPA: $IPA_PATH"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vault-ios-ipa
+          path: ${{ steps.locate.outputs.ipa_path }}
+          if-no-files-found: error
