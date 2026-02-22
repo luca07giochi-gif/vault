@@ -188,18 +188,7 @@ namespace vault.iOS
                         return;
                     }
 
-                    string pickedName = picked.LastPathComponent ?? picked.Path ?? string.Empty;
-                    if (!string.Equals(Path.GetExtension(pickedName), ".vault", StringComparison.OrdinalIgnoreCase))
-                    {
-                        ShowError("Seleziona un file con estensione .vault.");
-                        return;
-                    }
-
-                    _ = Task.Run(async () =>
-                    {
-                        await Task.Delay(150);
-                        BeginInvokeOnMainThread(() => PromptPasswordAndOpenVault(picked));
-                    });
+                    BeginInvokeOnMainThread(() => PromptPasswordAndOpenVault(picked));
                 });
 
             await Task.CompletedTask;
@@ -751,8 +740,10 @@ namespace vault.iOS
             private void NotifyPicked(UIDocumentPickerViewController controller, NSUrl[]? urls)
             {
                 NSUrl[] safeUrls = urls ?? Array.Empty<NSUrl>();
-                controller.DismissViewController(true, null);
-                UIApplication.SharedApplication.BeginInvokeOnMainThread(() => _onPicked(safeUrls));
+                controller.DismissViewController(true, () =>
+                {
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(() => _onPicked(safeUrls));
+                });
             }
         }
 
