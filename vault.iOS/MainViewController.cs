@@ -690,7 +690,7 @@ namespace vault.iOS
                 _onPicked(new[] { url });
             }
 
-            public override void DidPickDocumentAtUrls(UIDocumentPickerViewController controller, NSUrl[] urls)
+            public override void DidPickDocument(UIDocumentPickerViewController controller, NSUrl[] urls)
             {
                 _onPicked(urls);
             }
