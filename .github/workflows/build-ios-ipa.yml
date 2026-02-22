@@ -31,7 +31,7 @@ jobs:
       - name: Publish iOS IPA (unsigned)
         run: |
           dotnet publish vault.iOS/vault.iOS.csproj \
-            -f net8.0-ios \
+            -f net8.0-ios17.0 \
             -c Release \
             -r ios-arm64 \
             -p:BuildIpa=true \
