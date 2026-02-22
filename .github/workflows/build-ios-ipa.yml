@@ -13,9 +13,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-ipa:
-    runs-on: macos-15-arm64
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
