@@ -36,6 +36,7 @@ jobs:
             -r ios-arm64 \
             -p:BuildIpa=true \
             -p:EnableCodeSigning=false \
+            -p:CheckEolWorkloads=false \
             -p:CheckEolTargetFramework=false
 
       - name: Locate IPA

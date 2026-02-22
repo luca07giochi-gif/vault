@@ -25,7 +25,7 @@ Richiede macOS + Xcode + workload iOS:
 
 ```bash
 dotnet workload install ios
-dotnet publish vault.iOS/vault.iOS.csproj -f net8.0-ios -c Release -r ios-arm64 -p:BuildIpa=true -p:EnableCodeSigning=false -p:CheckEolTargetFramework=false
+dotnet publish vault.iOS/vault.iOS.csproj -f net8.0-ios -c Release -r ios-arm64 -p:BuildIpa=true -p:EnableCodeSigning=false -p:CheckEolWorkloads=false -p:CheckEolTargetFramework=false
 ```
 
 ## Build da GitHub Actions
