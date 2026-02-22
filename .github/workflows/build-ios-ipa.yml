@@ -6,6 +6,7 @@ on:
     branches: [ "main" ]
     paths:
       - ".github/workflows/build-ios-ipa.yml"
+      - "global.json"
       - "vault.iOS/**"
       - "vault.Core/**"
 
@@ -14,7 +15,7 @@ permissions:
 
 jobs:
   build-ipa:
-    runs-on: macos-latest
+    runs-on: macos-15-arm64
 
     steps:
       - name: Checkout
@@ -36,7 +37,7 @@ jobs:
       - name: Publish iOS IPA (unsigned)
         run: |
           dotnet publish vault.iOS/vault.iOS.csproj \
-            -f net8.0-ios17.0 \
+            -f net8.0-ios16.4 \
             -c Release \
             -r ios-arm64 \
             -p:BuildIpa=true \

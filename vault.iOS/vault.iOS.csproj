@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0-ios17.0</TargetFramework>
+    <TargetFramework>net8.0-ios16.4</TargetFramework>
     <OutputType>Exe</OutputType>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -17,7 +17,7 @@
     <SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion>
     <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
     <MtouchLink>SdkOnly</MtouchLink>
-    <MtouchExtraArgs>$(MtouchExtraArgs) --gcc_flags "-framework Security -framework CoreFoundation"</MtouchExtraArgs>
+    <MtouchExtraArgs>--gcc_flags "-framework Security -framework CoreFoundation"</MtouchExtraArgs>
     <PublishTrimmed>true</PublishTrimmed>
     <CheckEolWorkloads>false</CheckEolWorkloads>
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
@@ -25,15 +25,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\vault.Core\vault.Core.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <NativeReference Include="/System/Library/Frameworks/Security.framework">
-      <Kind>Framework</Kind>
-    </NativeReference>
-    <NativeReference Include="/System/Library/Frameworks/CoreFoundation.framework">
-      <Kind>Framework</Kind>
-    </NativeReference>
   </ItemGroup>
 
 </Project>
