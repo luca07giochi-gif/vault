@@ -183,7 +183,10 @@ namespace vault.iOS
                 {
                     NSUrl? picked = urls?.FirstOrDefault();
                     if (picked == null)
+                    {
+                        ShowError("Nessun file selezionato.");
                         return;
+                    }
 
                     string pickedName = picked.LastPathComponent ?? picked.Path ?? string.Empty;
                     if (!string.Equals(Path.GetExtension(pickedName), ".vault", StringComparison.OrdinalIgnoreCase))
@@ -192,7 +195,11 @@ namespace vault.iOS
                         return;
                     }
 
-                    PromptPasswordAndOpenVault(picked);
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(150);
+                        BeginInvokeOnMainThread(() => PromptPasswordAndOpenVault(picked));
+                    });
                 });
 
             await Task.CompletedTask;
@@ -744,7 +751,8 @@ namespace vault.iOS
             private void NotifyPicked(UIDocumentPickerViewController controller, NSUrl[]? urls)
             {
                 NSUrl[] safeUrls = urls ?? Array.Empty<NSUrl>();
-                controller.DismissViewController(true, () => _onPicked(safeUrls));
+                controller.DismissViewController(true, null);
+                UIApplication.SharedApplication.BeginInvokeOnMainThread(() => _onPicked(safeUrls));
             }
         }
 
