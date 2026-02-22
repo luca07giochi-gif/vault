@@ -42,7 +42,16 @@ jobs:
             -p:BuildIpa=true \
             -p:EnableCodeSigning=false \
             -p:CheckEolWorkloads=false \
-            -p:CheckEolTargetFramework=false
+            -p:CheckEolTargetFramework=false \
+            -bl:publish-ios.binlog
+
+      - name: Upload iOS publish binlog
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-publish-binlog
+          path: publish-ios.binlog
+          if-no-files-found: ignore
 
       - name: Locate IPA
         id: locate
