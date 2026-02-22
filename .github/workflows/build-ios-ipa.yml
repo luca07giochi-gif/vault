@@ -49,7 +49,7 @@ jobs:
             -p:CheckEolWorkloads=false \
             -p:CheckEolTargetFramework=false \
             -fl \
-            -flp:logfile=publish-ios.log;verbosity=diagnostic \
+            "-flp:logfile=publish-ios.log;verbosity=diagnostic" \
             -bl:publish-ios.binlog
 
       - name: Upload iOS publish binlog
