@@ -12,7 +12,7 @@ namespace vault.iOS
         {
             Window = new UIWindow(UIScreen.MainScreen.Bounds)
             {
-                RootViewController = new MainViewController()
+                RootViewController = new UINavigationController(new MainViewController())
             };
             Window.MakeKeyAndVisible();
             return true;
