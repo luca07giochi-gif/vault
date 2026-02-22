@@ -185,7 +185,8 @@ namespace vault.iOS
                     if (picked == null)
                         return;
 
-                    if (!string.Equals(Path.GetExtension(picked.LastPathComponent ?? string.Empty), ".vault", StringComparison.OrdinalIgnoreCase))
+                    string pickedName = picked.LastPathComponent ?? picked.Path ?? string.Empty;
+                    if (!string.Equals(Path.GetExtension(pickedName), ".vault", StringComparison.OrdinalIgnoreCase))
                     {
                         ShowError("Seleziona un file con estensione .vault.");
                         return;
@@ -727,12 +728,23 @@ namespace vault.iOS
 
             public override void DidPickDocument(UIDocumentPickerViewController controller, NSUrl url)
             {
-                _onPicked(new[] { url });
+                NotifyPicked(controller, new[] { url });
             }
 
             public override void DidPickDocument(UIDocumentPickerViewController controller, NSUrl[] urls)
             {
-                _onPicked(urls);
+                NotifyPicked(controller, urls);
+            }
+
+            public override void WasCancelled(UIDocumentPickerViewController controller)
+            {
+                controller.DismissViewController(true, null);
+            }
+
+            private void NotifyPicked(UIDocumentPickerViewController controller, NSUrl[]? urls)
+            {
+                NSUrl[] safeUrls = urls ?? Array.Empty<NSUrl>();
+                controller.DismissViewController(true, () => _onPicked(safeUrls));
             }
         }
 
