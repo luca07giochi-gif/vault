@@ -68,10 +68,13 @@ namespace vault.iOS
         public override void ViewDidLayoutSubviews()
         {
             base.ViewDidLayoutSubviews();
+            UIView? view = View;
+            if (view == null)
+                return;
 
             if (_busyOverlay != null)
             {
-                _busyOverlay.Frame = View.Bounds;
+                _busyOverlay.Frame = view.Bounds;
             }
 
             if (_busyIndicator != null && _busyLabel != null)
@@ -79,8 +82,8 @@ namespace vault.iOS
                 const float indicatorSize = 56f;
                 const float labelWidth = 280f;
                 const float labelHeight = 48f;
-                float centerX = (float)View.Bounds.GetMidX();
-                float centerY = (float)View.Bounds.GetMidY();
+                float centerX = (float)view.Bounds.GetMidX();
+                float centerY = (float)view.Bounds.GetMidY();
 
                 _busyIndicator.Frame = new CGRect(centerX - indicatorSize / 2f, centerY - 52f, indicatorSize, indicatorSize);
                 _busyLabel.Frame = new CGRect(centerX - labelWidth / 2f, centerY + 8f, labelWidth, labelHeight);
@@ -89,7 +92,11 @@ namespace vault.iOS
 
         private void BuildBusyOverlay()
         {
-            _busyOverlay = new UIView(View.Bounds)
+            UIView? view = View;
+            if (view == null)
+                return;
+
+            _busyOverlay = new UIView(view.Bounds)
             {
                 AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight,
                 BackgroundColor = UIColor.Black.ColorWithAlpha(0.35f),
@@ -112,7 +119,7 @@ namespace vault.iOS
 
             _busyOverlay.AddSubview(_busyIndicator);
             _busyOverlay.AddSubview(_busyLabel);
-            View.AddSubview(_busyOverlay);
+            view.AddSubview(_busyOverlay);
         }
 
         private void ConfigureNavigationItems()
@@ -233,7 +240,7 @@ namespace vault.iOS
             });
 
             prompt.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-            prompt.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, _ =>
+            prompt.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, __ =>
             {
                 string password = prompt.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
                 _ = OpenVaultAsync(vaultUrl, password);
@@ -333,11 +340,17 @@ namespace vault.iOS
                 $"{item.SizeLabel} - {item.AddedAtLabel}",
                 UIAlertControllerStyle.ActionSheet);
 
-            sheet.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, _ => _ = OpenFileAsync(item)));
-            sheet.AddAction(UIAlertAction.Create("Esporta", UIAlertActionStyle.Default, _ => _ = ExportFileAsync(item)));
-            sheet.AddAction(UIAlertAction.Create("Rinomina", UIAlertActionStyle.Default, _ => PromptRename(item)));
-            sheet.AddAction(UIAlertAction.Create("Sposta", UIAlertActionStyle.Default, _ => PromptMove(item)));
-            sheet.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, _ => PromptDelete(item)));
+            sheet.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, __ =>
+            {
+                _ = OpenFileAsync(item);
+            }));
+            sheet.AddAction(UIAlertAction.Create("Esporta", UIAlertActionStyle.Default, __ =>
+            {
+                _ = ExportFileAsync(item);
+            }));
+            sheet.AddAction(UIAlertAction.Create("Rinomina", UIAlertActionStyle.Default, __ => PromptRename(item)));
+            sheet.AddAction(UIAlertAction.Create("Sposta", UIAlertActionStyle.Default, __ => PromptMove(item)));
+            sheet.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, __ => PromptDelete(item)));
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
 
             ConfigurePopover(sheet);
@@ -391,11 +404,14 @@ namespace vault.iOS
             });
 
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-            alert.AddAction(UIAlertAction.Create("Conferma", UIAlertActionStyle.Default, _ =>
+            alert.AddAction(UIAlertAction.Create("Conferma", UIAlertActionStyle.Default, __ =>
             {
                 string newName = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
                 _ = RunBusyAsync("Rinomina...", async () =>
                 {
+                    if (_session == null)
+                        return;
+
                     _session.RenameItem(item.Id, newName);
                     await PersistVaultAsync();
                     ReloadFolderItems();
@@ -426,10 +442,13 @@ namespace vault.iOS
                 if (string.Equals(folder, item.ParentPath, StringComparison.OrdinalIgnoreCase))
                     label += " (attuale)";
 
-                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, _ =>
+                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, __ =>
                 {
                     _ = RunBusyAsync("Spostamento...", async () =>
                     {
+                        if (_session == null)
+                            return;
+
                         _session.MoveItems(new[] { item.Id }, folder);
                         await PersistVaultAsync();
                         ReloadFolderItems();
@@ -453,10 +472,13 @@ namespace vault.iOS
                 UIAlertControllerStyle.Alert);
 
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-            alert.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, _ =>
+            alert.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, __ =>
             {
                 _ = RunBusyAsync("Eliminazione...", async () =>
                 {
+                    if (_session == null)
+                        return;
+
                     _session.DeleteItems(new[] { item.Id });
                     await PersistVaultAsync();
                     ReloadFolderItems();
@@ -496,10 +518,13 @@ namespace vault.iOS
         {
             if (_busyOverlay == null || _busyIndicator == null || _busyLabel == null)
                 return;
+            UIView? view = View;
+            if (view == null)
+                return;
 
             _busyLabel.Text = string.IsNullOrWhiteSpace(message) ? "Operazione in corso..." : message;
             _busyOverlay.Hidden = !busy;
-            View.UserInteractionEnabled = !busy;
+            view.UserInteractionEnabled = !busy;
 
             if (busy)
                 _busyIndicator.StartAnimating();
@@ -520,6 +545,10 @@ namespace vault.iOS
 
         private void PresentDocumentPreview(string localPath)
         {
+            UIView? view = View;
+            if (view == null)
+                return;
+
             NSUrl fileUrl = NSUrl.FromFilename(localPath);
             _documentInteractionDelegate ??= new DocumentInteractionDelegate(this);
             _documentInteractionController = UIDocumentInteractionController.FromUrl(fileUrl);
@@ -529,14 +558,18 @@ namespace vault.iOS
             if (!previewShown)
             {
                 _documentInteractionController.PresentOptionsMenu(
-                    new CGRect(View.Bounds.GetMidX(), View.Bounds.GetMidY(), 1, 1),
-                    View,
+                    new CGRect(view.Bounds.GetMidX(), view.Bounds.GetMidY(), 1, 1),
+                    view,
                     true);
             }
         }
 
         private void PresentShareSheet(string localPath)
         {
+            UIView? view = View;
+            if (view == null)
+                return;
+
             NSUrl fileUrl = NSUrl.FromFilename(localPath);
             var activity = new UIActivityViewController(new NSObject[] { fileUrl }, null);
             activity.CompletionWithItemsHandler = (_, _, _, _) => DeleteTemporaryFile(localPath);
@@ -544,8 +577,8 @@ namespace vault.iOS
             UIPopoverPresentationController? popover = activity.PopoverPresentationController;
             if (popover != null)
             {
-                popover.SourceView = View;
-                popover.SourceRect = new CGRect(View.Bounds.GetMidX(), View.Bounds.GetMidY(), 1, 1);
+                popover.SourceView = view;
+                popover.SourceRect = new CGRect(view.Bounds.GetMidX(), view.Bounds.GetMidY(), 1, 1);
             }
 
             PresentViewController(activity, true, null);
@@ -615,9 +648,12 @@ namespace vault.iOS
             UIPopoverPresentationController? popover = sheet.PopoverPresentationController;
             if (popover == null)
                 return;
+            UIView? view = View;
+            if (view == null)
+                return;
 
-            popover.SourceView = View;
-            popover.SourceRect = new CGRect(View.Bounds.GetMidX(), View.Bounds.GetMidY(), 1, 1);
+            popover.SourceView = view;
+            popover.SourceRect = new CGRect(view.Bounds.GetMidX(), view.Bounds.GetMidY(), 1, 1);
         }
 
         private void HandleRowTapped(int index)
@@ -661,10 +697,12 @@ namespace vault.iOS
                     ?? new UITableViewCell(UITableViewCellStyle.Subtitle, CellId);
 
                 VaultFileItem item = _owner._visibleItems[indexPath.Row];
-                cell.TextLabel.Text = $"{item.IconEmoji}  {item.FileName}";
-                cell.DetailTextLabel.Text = item.IsFolder
+                UIListContentConfiguration content = cell.DefaultContentConfiguration();
+                content.Text = $"{item.IconEmoji}  {item.FileName}";
+                content.SecondaryText = item.IsFolder
                     ? $"Cartella - {item.AddedAtLabel}"
                     : $"{item.SizeLabel} - {item.AddedAtLabel}";
+                cell.ContentConfiguration = content;
                 cell.Accessory = item.IsFolder ? UITableViewCellAccessory.DisclosureIndicator : UITableViewCellAccessory.None;
                 return cell;
             }
