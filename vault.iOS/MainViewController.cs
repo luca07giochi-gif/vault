@@ -258,8 +258,11 @@ namespace vault.iOS
 
             await RunBusyAsync("Apertura vault...", async () =>
             {
-                byte[] vaultBytes = await Task.Run(() => ReadAllBytes(vaultUrl));
-                VaultPortableReader reader = await Task.Run(() => VaultPortableReader.Open(vaultBytes, password, allowUltra: true));
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+
+                VaultPortableReader reader = await Task.Run(() => OpenVaultReader(vaultUrl, password));
 
                 _session?.Dispose();
                 _session = reader;
@@ -277,25 +280,13 @@ namespace vault.iOS
 
             await RunBusyAsync("Aggiunta file...", async () =>
             {
+                VaultPortableReader session = _session!;
                 foreach (NSUrl url in urls)
                 {
                     if (url == null)
                         continue;
 
-                    string fileName = url.LastPathComponent ?? Path.GetFileName(url.Path ?? string.Empty);
-                    if (string.IsNullOrWhiteSpace(fileName))
-                        fileName = "file.bin";
-
-                    byte[] fileBytes = await Task.Run(() => ReadAllBytes(url));
-                    try
-                    {
-                        _session.AddFile(fileName, fileBytes, _currentFolder);
-                    }
-                    finally
-                    {
-                        if (fileBytes.Length > 0)
-                            Array.Clear(fileBytes, 0, fileBytes.Length);
-                    }
+                    await Task.Run(() => AddFileFromUrl(session, url, _currentFolder));
                 }
 
                 await PersistVaultAsync();
@@ -365,11 +356,7 @@ namespace vault.iOS
 
             await RunBusyAsync("Preparazione file...", async () =>
             {
-                byte[] fileBytes = await Task.Run(() => _session.ReadFileContent(item.Id));
-                string tempPath = await Task.Run(() => WriteTemporaryFile(item.FileName, fileBytes));
-                if (fileBytes.Length > 0)
-                    Array.Clear(fileBytes, 0, fileBytes.Length);
-
+                string tempPath = await Task.Run(() => WriteTemporaryFileFromVault(_session, item));
                 PresentDocumentPreview(tempPath);
             });
         }
@@ -381,11 +368,7 @@ namespace vault.iOS
 
             await RunBusyAsync("Preparazione export...", async () =>
             {
-                byte[] fileBytes = await Task.Run(() => _session.ReadFileContent(item.Id));
-                string tempPath = await Task.Run(() => WriteTemporaryFile(item.FileName, fileBytes));
-                if (fileBytes.Length > 0)
-                    Array.Clear(fileBytes, 0, fileBytes.Length);
-
+                string tempPath = await Task.Run(() => WriteTemporaryFileFromVault(_session, item));
                 PresentShareSheet(tempPath);
             });
         }
@@ -492,8 +475,9 @@ namespace vault.iOS
             if (_session == null || _vaultUrl == null || !_session.IsDirty)
                 return;
 
-            byte[] updatedVault = await Task.Run(() => _session.ExportVaultBytes());
-            await Task.Run(() => WriteAllBytes(_vaultUrl, updatedVault));
+            VaultPortableReader session = _session;
+            NSUrl vaultUrl = _vaultUrl;
+            await Task.Run(() => PersistVaultToUrl(vaultUrl, session));
         }
 
         private async Task RunBusyAsync(string message, Func<Task> action)
@@ -502,6 +486,10 @@ namespace vault.iOS
             try
             {
                 await action();
+            }
+            catch (OutOfMemoryException)
+            {
+                ShowError("Memoria iOS insufficiente durante l'operazione richiesta. Chiudi altre app e riprova.");
             }
             catch (Exception ex)
             {
@@ -583,13 +571,14 @@ namespace vault.iOS
             PresentViewController(activity, true, null);
         }
 
-        private string WriteTemporaryFile(string originalFileName, byte[] content)
+        private string WriteTemporaryFileFromVault(VaultPortableReader session, VaultFileItem item)
         {
-            string extension = Path.GetExtension(originalFileName ?? string.Empty);
-            string tempName = $"{Guid.NewGuid():N}{extension}";
-            string tempPath = Path.Combine(Path.GetTempPath(), tempName);
+            string tempPath = CreateTemporaryPath(item.FileName);
+            using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                session.CopyFileContentToStream(item.Id, output);
+            }
 
-            File.WriteAllBytes(tempPath, content);
             _temporaryFiles.Add(tempPath);
             return tempPath;
         }
@@ -611,7 +600,7 @@ namespace vault.iOS
             }
         }
 
-        private static byte[] ReadAllBytes(NSUrl fileUrl)
+        private static void AddFileFromUrl(VaultPortableReader session, NSUrl fileUrl, string targetFolder)
         {
             using var scope = new SecurityScopeAccess(fileUrl);
 
@@ -619,10 +608,17 @@ namespace vault.iOS
             if (string.IsNullOrWhiteSpace(path))
                 throw new IOException("Percorso file non valido.");
 
-            return File.ReadAllBytes(path);
+            session.AddFileFromPath(path, targetFolder);
         }
 
-        private static void WriteAllBytes(NSUrl fileUrl, byte[] content)
+        private static string CreateTemporaryPath(string originalFileName)
+        {
+            string extension = Path.GetExtension(originalFileName ?? string.Empty);
+            string tempName = $"{Guid.NewGuid():N}{extension}";
+            return Path.Combine(Path.GetTempPath(), tempName);
+        }
+
+        private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password)
         {
             using var scope = new SecurityScopeAccess(fileUrl);
 
@@ -630,7 +626,22 @@ namespace vault.iOS
             if (string.IsNullOrWhiteSpace(path))
                 throw new IOException("Percorso file non valido.");
 
-            File.WriteAllBytes(path, content);
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return VaultPortableReader.Open(stream, password, allowUltra: true);
+        }
+
+        private static void PersistVaultToUrl(NSUrl fileUrl, VaultPortableReader session)
+        {
+            using var scope = new SecurityScopeAccess(fileUrl);
+
+            string? path = fileUrl.Path;
+            if (string.IsNullOrWhiteSpace(path))
+                throw new IOException("Percorso file non valido.");
+
+            using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                session.SaveToStream(output);
+            }
         }
 
         private static string GetParentPath(string folderPath)

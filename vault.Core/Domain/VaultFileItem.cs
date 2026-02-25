@@ -14,6 +14,7 @@ namespace vault.Core.Domain
         public long AddedTicks { get; set; }
         public byte[] Content { get; set; } = Array.Empty<byte>();
         public List<byte[]> ContentChunks { get; set; } = new List<byte[]>();
+        public long ContentLengthOverride { get; set; } = -1;
 
         public string FullPath =>
             string.IsNullOrWhiteSpace(ParentPath) ? FileName : $"{ParentPath}/{FileName}";
@@ -25,9 +26,11 @@ namespace vault.Core.Domain
         public long ContentLength =>
             IsFolder
                 ? 0
-                : (HasChunkedContent
-                    ? ContentChunks.Sum(chunk => (long)chunk.Length)
-                    : (Content?.LongLength ?? 0));
+                : (ContentLengthOverride >= 0
+                    ? ContentLengthOverride
+                    : (HasChunkedContent
+                        ? ContentChunks.Sum(chunk => (long)chunk.Length)
+                        : (Content?.LongLength ?? 0)));
 
         public bool HasChunkedContent =>
             ContentChunks != null &&

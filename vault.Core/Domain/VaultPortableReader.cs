@@ -9,16 +9,20 @@ using vault.Core.Crypto;
 
 namespace vault.Core.Domain
 {
-    // In-memory vault session for web/mobile scenarios:
-    // open from byte[] and read/modify without filesystem dependencies.
     public sealed class VaultPortableReader : IDisposable
     {
         private const long MaxStandardImportableFileBytes = int.MaxValue - 4096L;
         private const int UltraFileChunkSizeBytes = 8 * 1024 * 1024;
+        private const int PlaintextMagic = 0x5641554C; // "VAUL"
+        private const int PlaintextFormatVersionStandard = 3;
+        private const int PlaintextFormatVersionUltra = 4;
+        private const int CopyBufferSize = 256 * 1024;
 
         private readonly VaultContent _content;
         private readonly VaultStorageFormat _storageFormat;
         private readonly byte[] _salt;
+        private readonly string _sessionDirectory;
+        private readonly Dictionary<Guid, FileContentHandle> _fileContent = new();
         private byte[]? _sessionKey;
         private bool _disposed;
 
@@ -26,12 +30,22 @@ namespace vault.Core.Domain
             VaultContent content,
             VaultStorageFormat storageFormat,
             byte[] sessionKey,
-            byte[] salt)
+            byte[] salt,
+            string sessionDirectory,
+            IDictionary<Guid, FileContentHandle>? initialContent)
         {
             _content = content ?? throw new ArgumentNullException(nameof(content));
             _storageFormat = storageFormat;
             _sessionKey = sessionKey ?? throw new ArgumentNullException(nameof(sessionKey));
             _salt = salt ?? throw new ArgumentNullException(nameof(salt));
+            _sessionDirectory = sessionDirectory ?? throw new ArgumentNullException(nameof(sessionDirectory));
+
+            Directory.CreateDirectory(_sessionDirectory);
+            if (initialContent != null)
+            {
+                foreach (KeyValuePair<Guid, FileContentHandle> entry in initialContent)
+                    _fileContent[entry.Key] = entry.Value;
+            }
         }
 
         public VaultStorageFormat StorageFormat => _storageFormat;
@@ -65,7 +79,7 @@ namespace vault.Core.Domain
                 .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            paths.Insert(0, string.Empty); // root
+            paths.Insert(0, string.Empty);
             return paths;
         }
 
@@ -87,7 +101,8 @@ namespace vault.Core.Domain
                 IsFolder = true,
                 AddedTicks = DateTime.UtcNow.Ticks,
                 Content = Array.Empty<byte>(),
-                ContentChunks = new List<byte[]>()
+                ContentChunks = new List<byte[]>(),
+                ContentLengthOverride = 0
             };
 
             _content.Files.Add(created);
@@ -102,32 +117,30 @@ namespace vault.Core.Domain
             if (content == null)
                 throw new ArgumentNullException(nameof(content));
 
-            string normalizedTarget = NormalizePath(targetFolderPath);
-            EnsureFolderExists(normalizedTarget);
+            using var source = new MemoryStream(content, writable: false);
+            return AddFileFromStreamInternal(fileName, source, content.LongLength, targetFolderPath);
+        }
 
-            bool allowLargeSingleFile = _storageFormat == VaultStorageFormat.Ultra;
-            ValidateItemSize(content.LongLength, fileName, allowLargeSingleFile);
+        public VaultFileItem AddFileFromPath(string sourcePath, string? targetFolderPath)
+        {
+            ThrowIfDisposed();
 
-            string cleanName = SanitizeName(fileName, isFolder: false);
-            string uniqueName = EnsureUniqueName(normalizedTarget, cleanName, isFolder: false);
+            if (string.IsNullOrWhiteSpace(sourcePath))
+                throw new ArgumentException(VaultText.T("core.error.invalidPath"), nameof(sourcePath));
+            if (!File.Exists(sourcePath))
+                throw new FileNotFoundException(VaultText.T("core.error.fileNotFound"), sourcePath);
 
-            byte[] copied = content.Length == 0 ? Array.Empty<byte>() : content.ToArray();
-            var payload = BuildPayloadFromBuffer(copied, allowLargeSingleFile);
+            var info = new FileInfo(sourcePath);
+            using var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                CopyBufferSize,
+                FileOptions.SequentialScan);
 
-            var created = new VaultFileItem
-            {
-                Id = Guid.NewGuid(),
-                FileName = uniqueName,
-                ParentPath = normalizedTarget,
-                IsFolder = false,
-                AddedTicks = DateTime.UtcNow.Ticks,
-                Content = payload.Content,
-                ContentChunks = payload.ContentChunks
-            };
-
-            _content.Files.Add(created);
-            IsDirty = true;
-            return created;
+            string fileName = Path.GetFileName(sourcePath);
+            return AddFileFromStreamInternal(fileName, source, info.Length, targetFolderPath);
         }
 
         public void RenameItem(Guid itemId, string newName)
@@ -157,7 +170,7 @@ namespace vault.Core.Domain
             }
 
             string newRootPath = item.FullPath;
-            foreach (var descendant in _content.Files)
+            foreach (VaultFileItem descendant in _content.Files)
             {
                 if (descendant.Id == item.Id)
                     continue;
@@ -184,15 +197,15 @@ namespace vault.Core.Domain
             string destination = NormalizePath(destinationFolderPath);
             EnsureFolderExists(destination);
 
-            var requested = itemIds.Distinct().ToList();
+            List<Guid> requested = itemIds.Distinct().ToList();
             if (requested.Count == 0)
                 return;
 
-            var selected = _content.Files.Where(f => requested.Contains(f.Id)).ToList();
+            List<VaultFileItem> selected = _content.Files.Where(f => requested.Contains(f.Id)).ToList();
             if (selected.Count == 0)
                 return;
 
-            var selectedFolderPaths = selected
+            List<string> selectedFolderPaths = selected
                 .Where(f => f.IsFolder)
                 .Select(f => f.FullPath)
                 .ToList();
@@ -208,7 +221,7 @@ namespace vault.Core.Domain
 
             var oldPaths = _content.Files.ToDictionary(f => f.Id, f => f.FullPath);
 
-            var roots = selected.Where(item =>
+            List<VaultFileItem> roots = selected.Where(item =>
             {
                 string itemPath = oldPaths[item.Id];
                 return !selected.Any(parent =>
@@ -217,7 +230,7 @@ namespace vault.Core.Domain
                     itemPath.StartsWith(oldPaths[parent.Id] + "/", StringComparison.OrdinalIgnoreCase));
             }).ToList();
 
-            foreach (var root in roots)
+            foreach (VaultFileItem root in roots)
             {
                 string oldRootPath = oldPaths[root.Id];
                 if (string.Equals(root.ParentPath, destination, StringComparison.OrdinalIgnoreCase))
@@ -232,7 +245,7 @@ namespace vault.Core.Domain
                     continue;
 
                 string newRootPath = root.FullPath;
-                foreach (var descendant in _content.Files)
+                foreach (VaultFileItem descendant in _content.Files)
                 {
                     if (descendant.Id == root.Id)
                         continue;
@@ -257,18 +270,18 @@ namespace vault.Core.Domain
             if (itemIds == null)
                 throw new ArgumentNullException(nameof(itemIds));
 
-            var requested = itemIds.Distinct().ToList();
+            List<Guid> requested = itemIds.Distinct().ToList();
             if (requested.Count == 0)
                 return;
 
-            var selected = _content.Files.Where(f => requested.Contains(f.Id)).ToList();
+            List<VaultFileItem> selected = _content.Files.Where(f => requested.Contains(f.Id)).ToList();
             if (selected.Count == 0)
                 return;
 
             var removeIds = new HashSet<Guid>(selected.Select(s => s.Id));
-            var selectedFolders = selected.Where(s => s.IsFolder).Select(s => s.FullPath).ToList();
+            List<string> selectedFolders = selected.Where(s => s.IsFolder).Select(s => s.FullPath).ToList();
 
-            foreach (var item in _content.Files)
+            foreach (VaultFileItem item in _content.Files)
             {
                 if (removeIds.Contains(item.Id))
                     continue;
@@ -277,23 +290,11 @@ namespace vault.Core.Domain
                     removeIds.Add(item.Id);
             }
 
-            var toRemove = _content.Files.Where(f => removeIds.Contains(f.Id)).ToList();
-            foreach (var item in toRemove)
+            List<VaultFileItem> toRemove = _content.Files.Where(f => removeIds.Contains(f.Id)).ToList();
+            foreach (VaultFileItem item in toRemove)
             {
-                if (item.Content.Length > 0)
-                    Array.Clear(item.Content, 0, item.Content.Length);
-
-                if (item.ContentChunks.Count > 0)
-                {
-                    foreach (var chunk in item.ContentChunks)
-                    {
-                        if (chunk.Length > 0)
-                            Array.Clear(chunk, 0, chunk.Length);
-                    }
-
-                    item.ContentChunks.Clear();
-                }
-
+                RemoveHandle(item.Id);
+                ClearItemPayload(item);
                 _content.Files.Remove(item);
             }
 
@@ -304,9 +305,7 @@ namespace vault.Core.Domain
         {
             ThrowIfDisposed();
 
-            VaultFileItem? file = _content.Files.FirstOrDefault(f => f.Id == fileId);
-            if (file == null)
-                throw new FileNotFoundException(VaultText.T("core.error.fileNotFound"));
+            VaultFileItem file = GetFileItem(fileId);
             if (file.IsFolder)
                 throw new InvalidOperationException(VaultText.T("core.error.selectedIsFolder"));
 
@@ -318,28 +317,67 @@ namespace vault.Core.Domain
                 throw new InvalidOperationException(VaultText.F("core.error.fileTooLargeForFormat", file.FileName));
 
             using var ms = new MemoryStream((int)contentLength);
-            foreach (byte[] chunk in file.GetContentChunks())
-            {
-                if (chunk.Length == 0)
-                    continue;
-
-                ms.Write(chunk, 0, chunk.Length);
-            }
-
+            CopyFileContentToStream(fileId, ms);
             return ms.ToArray();
+        }
+
+        public void CopyFileContentToStream(Guid fileId, Stream destination)
+        {
+            ThrowIfDisposed();
+
+            if (destination == null)
+                throw new ArgumentNullException(nameof(destination));
+            if (!destination.CanWrite)
+                throw new InvalidOperationException(VaultText.T("core.format.targetNotWritable"));
+
+            VaultFileItem file = GetFileItem(fileId);
+            if (file.IsFolder)
+                throw new InvalidOperationException(VaultText.T("core.error.selectedIsFolder"));
+
+            long contentLength = file.ContentLength;
+            if (contentLength == 0)
+                return;
+
+            using Stream source = OpenContentReadStream(file);
+            CopyExactly(
+                source,
+                destination,
+                contentLength,
+                VaultText.T("core.serializer.fileContentIncomplete"));
         }
 
         public byte[] ExportVaultBytes(IProgress<double>? progress = null)
         {
             ThrowIfDisposed();
+
+            using var ms = new MemoryStream();
+            SaveToStream(ms, progress);
+            return ms.ToArray();
+        }
+
+        public void SaveToStream(Stream output, IProgress<double>? progress = null)
+        {
+            ThrowIfDisposed();
+
+            if (output == null)
+                throw new ArgumentNullException(nameof(output));
+            if (!output.CanWrite)
+                throw new InvalidOperationException(VaultText.T("core.format.targetNotWritable"));
             if (_sessionKey == null || _sessionKey.Length == 0)
                 throw new InvalidOperationException(VaultText.T("core.error.noVaultOpen"));
 
             if (_storageFormat == VaultStorageFormat.Legacy)
-                return SaveLegacy(progress);
+            {
+                byte[] bytes = SaveLegacy(progress);
+                output.Write(bytes, 0, bytes.Length);
+                Array.Clear(bytes, 0, bytes.Length);
+                IsDirty = false;
+                return;
+            }
 
             bool ultra = _storageFormat == VaultStorageFormat.Ultra;
-            return SaveStreaming(ultra, progress);
+            SaveStreamingToStream(output, ultra, progress);
+            IsDirty = false;
         }
 
         public static VaultPortableReader Open(
@@ -376,8 +414,9 @@ namespace vault.Core.Domain
                     throw new InvalidDataException(VaultText.T("core.format.fileTooShort"));
             }
 
-            ReportProgress(progress, 2);
+            string sessionDirectory = CreateSessionDirectory();
 
+            ReportProgress(progress, 2);
             byte[] headerBytes = ReadExactly(vaultStream, VaultFileFormat.HEADER_SIZE, VaultText.T("core.format.headerIncomplete"));
             var header = VaultFileFormat.ReadHeaderFromBytes(headerBytes);
             ReportProgress(progress, 8);
@@ -399,20 +438,28 @@ namespace vault.Core.Domain
                 if (format == VaultStorageFormat.Ultra && !allowUltra)
                     throw new NotSupportedException(VaultText.T("core.error.ultraNotSupportedInWeb"));
 
-                VaultContent content = format switch
+                OpenSessionData opened = format switch
                 {
-                    VaultStorageFormat.Legacy => ReadLegacy(vaultStream, header, sessionKey, progress),
-                    VaultStorageFormat.Ultra or VaultStorageFormat.Extended => ReadStreaming(vaultStream, header, sessionKey, progress),
+                    VaultStorageFormat.Legacy => ReadLegacy(vaultStream, header, sessionKey, sessionDirectory, progress),
+                    VaultStorageFormat.Ultra or VaultStorageFormat.Extended => ReadStreaming(vaultStream, header, sessionKey, sessionDirectory, progress),
                     _ => throw new InvalidDataException(VaultText.T("core.error.unsupportedVaultVersion"))
                 };
 
                 ReportProgress(progress, 100);
-                return new VaultPortableReader(content, format, sessionKey, header.Salt.ToArray());
+                return new VaultPortableReader(
+                    opened.Content,
+                    format,
+                    sessionKey,
+                    header.Salt.ToArray(),
+                    sessionDirectory,
+                    opened.ContentHandles);
             }
             catch
             {
                 if (sessionKey.Length > 0)
                     Array.Clear(sessionKey, 0, sessionKey.Length);
+
+                CleanupSessionDirectory(sessionDirectory);
                 throw;
             }
             finally
@@ -421,9 +468,52 @@ namespace vault.Core.Domain
             }
         }
 
+        private VaultFileItem AddFileFromStreamInternal(
+            string fileName,
+            Stream source,
+            long contentLength,
+            string? targetFolderPath)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+            if (!source.CanRead)
+                throw new InvalidOperationException(VaultText.T("core.format.sourceNotReadable"));
+            if (contentLength < 0)
+                throw new ArgumentOutOfRangeException(nameof(contentLength));
+
+            string normalizedTarget = NormalizePath(targetFolderPath);
+            EnsureFolderExists(normalizedTarget);
+
+            bool allowLargeSingleFile = _storageFormat == VaultStorageFormat.Ultra;
+            ValidateItemSize(contentLength, fileName, allowLargeSingleFile);
+
+            string cleanName = SanitizeName(fileName, isFolder: false);
+            string uniqueName = EnsureUniqueName(normalizedTarget, cleanName, isFolder: false);
+
+            Guid id = Guid.NewGuid();
+            FileContentHandle handle = CreateHandleFromStream(id, uniqueName, source, contentLength);
+
+            var created = new VaultFileItem
+            {
+                Id = id,
+                FileName = uniqueName,
+                ParentPath = normalizedTarget,
+                IsFolder = false,
+                AddedTicks = DateTime.UtcNow.Ticks,
+                Content = Array.Empty<byte>(),
+                ContentChunks = new List<byte[]>(),
+                ContentLengthOverride = contentLength
+            };
+
+            _fileContent[id] = handle;
+            _content.Files.Add(created);
+            IsDirty = true;
+            return created;
+        }
+
         private byte[] SaveLegacy(IProgress<double>? progress)
         {
-            _content.Metadata.Version = 3;
+            _content.Metadata.Version = PlaintextFormatVersionStandard;
 
             byte[] nonce = VaultFileFormat.GenerateNonce();
             var header = new VaultFileFormat.Header(
@@ -433,10 +523,13 @@ namespace vault.Core.Domain
                 nonce);
 
             ReportProgress(progress, 5);
-            byte[] plaintext = VaultSerializer.Serialize(
-                _content,
-                CreateScaledProgress(progress, 8, 55),
-                ultraContent: false);
+
+            byte[] plaintext;
+            using (var plaintextStream = new MemoryStream())
+            {
+                WritePlaintext(plaintextStream, ultraContent: false, CreateScaledProgress(progress, 8, 55));
+                plaintext = plaintextStream.ToArray();
+            }
 
             ReportProgress(progress, 70);
             byte[] aad = VaultFileFormat.SerializeHeaderForAad(header);
@@ -449,13 +542,14 @@ namespace vault.Core.Domain
             Array.Clear(encrypted, 0, encrypted.Length);
 
             ReportProgress(progress, 100);
-            IsDirty = false;
             return output.ToArray();
         }
 
-        private byte[] SaveStreaming(bool ultraContent, IProgress<double>? progress)
+        private void SaveStreamingToStream(Stream output, bool ultraContent, IProgress<double>? progress)
         {
-            _content.Metadata.Version = ultraContent ? 4 : 3;
+            _content.Metadata.Version = ultraContent
+                ? PlaintextFormatVersionUltra
+                : PlaintextFormatVersionStandard;
 
             byte version = ultraContent
                 ? VaultFileFormat.ULTRA_STREAMING_VERSION
@@ -468,17 +562,158 @@ namespace vault.Core.Domain
                 _salt,
                 nonce);
 
-            using var output = new MemoryStream();
             using Stream encrypting = VaultFileFormat.CreateStreamingEncryptingWriteStream(output, _sessionKey!, header);
-            VaultSerializer.SerializeToStream(
-                _content,
-                encrypting,
-                CreateScaledProgress(progress, 5, 98),
-                ultraContent: ultraContent);
-
+            WritePlaintext(encrypting, ultraContent, CreateScaledProgress(progress, 5, 98));
             ReportProgress(progress, 100);
-            IsDirty = false;
-            return output.ToArray();
+        }
+
+        private void WritePlaintext(Stream output, bool ultraContent, IProgress<double>? progress)
+        {
+            int formatVersion = ultraContent
+                ? PlaintextFormatVersionUltra
+                : PlaintextFormatVersionStandard;
+
+            using var writer = new BinaryWriter(output, Encoding.UTF8, leaveOpen: true);
+            writer.Write(PlaintextMagic);
+            writer.Write(formatVersion);
+            writer.Write(_content.Metadata.CreatedTicks);
+            writer.Write(_content.Files.Count);
+
+            long totalContentBytes = 0;
+            foreach (VaultFileItem file in _content.Files)
+            {
+                if (file.IsFolder)
+                    continue;
+
+                totalContentBytes = checked(totalContentBytes + file.ContentLength);
+            }
+
+            long writtenContentBytes = 0;
+            int itemCount = _content.Files.Count;
+
+            for (int i = 0; i < itemCount; i++)
+            {
+                VaultFileItem file = _content.Files[i];
+                writer.Write(file.Id.ToByteArray());
+                writer.Write(file.FileName ?? string.Empty);
+                writer.Write(file.ParentPath ?? string.Empty);
+                writer.Write(file.IsFolder);
+                writer.Write(file.AddedTicks);
+
+                if (ultraContent)
+                {
+                    WriteUltraPayload(
+                        writer,
+                        output,
+                        file,
+                        written =>
+                        {
+                            writtenContentBytes += written;
+                            if (totalContentBytes > 0)
+                                ReportProgress(progress, writtenContentBytes * 100.0 / totalContentBytes);
+                        });
+                }
+                else
+                {
+                    WriteStandardPayload(
+                        writer,
+                        output,
+                        file,
+                        written =>
+                        {
+                            writtenContentBytes += written;
+                            if (totalContentBytes > 0)
+                                ReportProgress(progress, writtenContentBytes * 100.0 / totalContentBytes);
+                        });
+                }
+
+                if (totalContentBytes == 0 && itemCount > 0)
+                    ReportProgress(progress, (i + 1) * 100.0 / itemCount);
+            }
+
+            writer.Flush();
+            ReportProgress(progress, 100);
+        }
+
+        private void WriteStandardPayload(
+            BinaryWriter writer,
+            Stream output,
+            VaultFileItem file,
+            Action<int>? onChunkWritten)
+        {
+            if (file.IsFolder)
+            {
+                writer.Write(0);
+                return;
+            }
+
+            long contentLength = file.ContentLength;
+            if (contentLength > int.MaxValue)
+            {
+                throw new InvalidOperationException(
+                    VaultText.F("core.error.fileTooLargeForFormat", file.FileName));
+            }
+
+            writer.Write((int)contentLength);
+            if (contentLength == 0)
+                return;
+
+            using Stream source = OpenContentReadStream(file);
+            CopyExactly(
+                source,
+                output,
+                contentLength,
+                VaultText.T("core.serializer.contentInconsistent"),
+                onChunkWritten);
+        }
+
+        private void WriteUltraPayload(
+            BinaryWriter writer,
+            Stream output,
+            VaultFileItem file,
+            Action<int>? onChunkWritten)
+        {
+            if (file.IsFolder)
+            {
+                writer.Write(0L);
+                writer.Write(0);
+                return;
+            }
+
+            long contentLength = file.ContentLength;
+            writer.Write(contentLength);
+
+            if (contentLength == 0)
+            {
+                writer.Write(0);
+                return;
+            }
+
+            long chunkCountLong = checked((contentLength + UltraFileChunkSizeBytes - 1L) / UltraFileChunkSizeBytes);
+            if (chunkCountLong > int.MaxValue)
+                throw new InvalidOperationException(VaultText.T("core.serializer.chunkCountInvalid"));
+
+            int chunkCount = (int)chunkCountLong;
+            writer.Write(chunkCount);
+
+            using Stream source = OpenContentReadStream(file);
+            long remaining = contentLength;
+            for (int i = 0; i < chunkCount; i++)
+            {
+                int chunkLength = (int)Math.Min(UltraFileChunkSizeBytes, remaining);
+                writer.Write(chunkLength);
+                CopyExactly(
+                    source,
+                    output,
+                    chunkLength,
+                    VaultText.T("core.serializer.contentInconsistent"),
+                    onChunkWritten);
+
+                remaining -= chunkLength;
+            }
+
+            if (remaining != 0)
+                throw new InvalidOperationException(VaultText.T("core.serializer.contentInconsistent"));
         }
 
         private static void WriteHeader(Stream output, VaultFileFormat.Header header)
@@ -489,10 +724,11 @@ namespace vault.Core.Domain
             output.Write(header.Nonce, 0, header.Nonce.Length);
         }
 
-        private static VaultContent ReadLegacy(
+        private static OpenSessionData ReadLegacy(
             Stream vaultStream,
             VaultFileFormat.Header header,
             byte[] sessionKey,
+            string sessionDirectory,
             IProgress<double>? progress)
         {
             byte[] encryptedPayload = ReadToEnd(vaultStream);
@@ -508,11 +744,14 @@ namespace vault.Core.Domain
 
             try
             {
-                if (decrypted.Length < 4 || BitConverter.ToInt32(decrypted, 0) != 0x5641554C)
+                if (decrypted.Length < 4 || BitConverter.ToInt32(decrypted, 0) != PlaintextMagic)
                     throw new CryptographicException(VaultText.T("core.error.passwordWrong"));
 
-                var deserializeProgress = CreateScaledProgress(progress, 62, 98);
-                return VaultSerializer.Deserialize(decrypted, deserializeProgress);
+                var deserializeProgress = CreateScaledProgress(progress, 62, 94);
+                VaultContent content = VaultSerializer.Deserialize(decrypted, deserializeProgress);
+                Dictionary<Guid, FileContentHandle> handles = BuildHandlesFromInMemoryContent(content, sessionDirectory);
+                ReportProgress(progress, 100);
+                return new OpenSessionData(content, handles);
             }
             finally
             {
@@ -520,15 +759,487 @@ namespace vault.Core.Domain
             }
         }
 
-        private static VaultContent ReadStreaming(
+        private static OpenSessionData ReadStreaming(
             Stream vaultStream,
             VaultFileFormat.Header header,
             byte[] sessionKey,
+            string sessionDirectory,
             IProgress<double>? progress)
         {
             using Stream decryptedPayload = VaultFileFormat.CreateStreamingDecryptingReadStream(vaultStream, sessionKey, header);
-            var deserializeProgress = CreateScaledProgress(progress, 20, 98);
-            return VaultSerializer.Deserialize(decryptedPayload, deserializeProgress);
+            return DeserializeStreamingPlaintext(decryptedPayload, sessionDirectory, CreateScaledProgress(progress, 20, 98));
+        }
+
+        private static OpenSessionData DeserializeStreamingPlaintext(
+            Stream input,
+            string sessionDirectory,
+            IProgress<double>? progress)
+        {
+            if (input == null)
+                throw new ArgumentNullException(nameof(input));
+
+            using var reader = new BinaryReader(input, Encoding.UTF8, leaveOpen: true);
+
+            int magic = reader.ReadInt32();
+            if (magic != PlaintextMagic)
+                throw new CryptographicException(VaultText.T("core.serializer.corruptWrongPassword"));
+
+            int version = reader.ReadInt32();
+            var metadata = new VaultMetadata
+            {
+                Version = version,
+                CreatedTicks = reader.ReadInt64()
+            };
+
+            int count = reader.ReadInt32();
+            if (count < 0)
+                throw new CryptographicException(VaultText.T("core.serializer.invalidItemCount"));
+
+            var files = new List<VaultFileItem>(Math.Max(0, count));
+            var handles = new Dictionary<Guid, FileContentHandle>();
+
+            if (version >= PlaintextFormatVersionUltra)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    double itemStartPercent = count == 0 ? 100 : i * 100.0 / count;
+                    double itemEndPercent = count == 0 ? 100 : (i + 1) * 100.0 / count;
+                    ReportProgress(progress, itemStartPercent);
+
+                    VaultFileItem item = ReadCommonItemMetadata(reader);
+
+                    long contentLen = reader.ReadInt64();
+                    if (contentLen < 0)
+                        throw new CryptographicException(VaultText.T("core.serializer.fileLengthInvalid"));
+
+                    int chunkCount = reader.ReadInt32();
+                    if (chunkCount < 0)
+                        throw new CryptographicException(VaultText.T("core.serializer.chunkCountInvalid"));
+
+                    if (item.IsFolder)
+                    {
+                        if (contentLen != 0 || chunkCount != 0)
+                            throw new CryptographicException(VaultText.T("core.serializer.folderContentInvalid"));
+                        item.ContentLengthOverride = 0;
+                    }
+                    else
+                    {
+                        FileContentHandle handle = ReadUltraPayloadToHandle(
+                            reader,
+                            item.Id,
+                            item.FileName,
+                            contentLen,
+                            chunkCount,
+                            sessionDirectory);
+
+                        handles[item.Id] = handle;
+                        item.ContentLengthOverride = contentLen;
+                    }
+
+                    files.Add(item);
+                    ReportProgress(progress, itemEndPercent);
+                }
+
+                EnsureNoTrailingData(input);
+                ReportProgress(progress, 100);
+                return new OpenSessionData(
+                    new VaultContent { Metadata = metadata, Files = files },
+                    handles);
+            }
+
+            if (version == PlaintextFormatVersionStandard)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    double itemStartPercent = count == 0 ? 100 : i * 100.0 / count;
+                    double itemEndPercent = count == 0 ? 100 : (i + 1) * 100.0 / count;
+                    ReportProgress(progress, itemStartPercent);
+
+                    VaultFileItem item = ReadCommonItemMetadata(reader);
+
+                    int contentLen = reader.ReadInt32();
+                    if (contentLen < 0)
+                        throw new CryptographicException(VaultText.T("core.serializer.fileLengthInvalid"));
+
+                    if (item.IsFolder)
+                    {
+                        if (contentLen != 0)
+                            throw new CryptographicException(VaultText.T("core.serializer.folderContentInvalid"));
+                        item.ContentLengthOverride = 0;
+                    }
+                    else
+                    {
+                        FileContentHandle handle = ReadStandardPayloadToHandle(
+                            reader,
+                            item.Id,
+                            item.FileName,
+                            contentLen,
+                            sessionDirectory);
+
+                        handles[item.Id] = handle;
+                        item.ContentLengthOverride = contentLen;
+                    }
+
+                    files.Add(item);
+                    ReportProgress(progress, itemEndPercent);
+                }
+
+                EnsureNoTrailingData(input);
+                ReportProgress(progress, 100);
+                return new OpenSessionData(
+                    new VaultContent { Metadata = metadata, Files = files },
+                    handles);
+            }
+
+            if (version == 2)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    double itemStartPercent = count == 0 ? 100 : i * 100.0 / count;
+                    double itemEndPercent = count == 0 ? 100 : (i + 1) * 100.0 / count;
+                    ReportProgress(progress, itemStartPercent);
+
+                    var file = new VaultFileItem
+                    {
+                        Id = new Guid(ReadExactly(reader.BaseStream, 16, VaultText.T("core.serializer.fileIdIncomplete"))),
+                        FileName = reader.ReadString(),
+                        ParentPath = string.Empty,
+                        IsFolder = false,
+                        AddedTicks = reader.ReadInt64(),
+                        Content = Array.Empty<byte>(),
+                        ContentChunks = new List<byte[]>()
+                    };
+
+                    int contentLen = reader.ReadInt32();
+                    if (contentLen < 0)
+                        throw new CryptographicException(VaultText.T("core.serializer.fileLengthInvalid"));
+
+                    FileContentHandle handle = ReadStandardPayloadToHandle(
+                        reader,
+                        file.Id,
+                        file.FileName,
+                        contentLen,
+                        sessionDirectory);
+
+                    handles[file.Id] = handle;
+                    file.ContentLengthOverride = contentLen;
+
+                    files.Add(file);
+                    ReportProgress(progress, itemEndPercent);
+                }
+
+                EnsureNoTrailingData(input);
+                metadata.Version = PlaintextFormatVersionStandard;
+                ReportProgress(progress, 100);
+                return new OpenSessionData(
+                    new VaultContent { Metadata = metadata, Files = files },
+                    handles);
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                double itemStartPercent = count == 0 ? 100 : i * 100.0 / count;
+                double itemEndPercent = count == 0 ? 100 : (i + 1) * 100.0 / count;
+                ReportProgress(progress, itemStartPercent);
+
+                Guid id = new Guid(ReadExactly(reader.BaseStream, 16, VaultText.T("core.serializer.legacyIdIncomplete")));
+                string title = reader.ReadString();
+                _ = reader.ReadString();
+                _ = reader.ReadString();
+                _ = reader.ReadString();
+                string fileName = reader.ReadString();
+                int contentLen = reader.ReadInt32();
+                if (contentLen < 0)
+                    throw new CryptographicException(VaultText.T("core.serializer.fileLengthInvalid"));
+
+                if (contentLen == 0)
+                {
+                    ReportProgress(progress, itemEndPercent);
+                    continue;
+                }
+
+                string finalName = string.IsNullOrWhiteSpace(fileName)
+                    ? (string.IsNullOrWhiteSpace(title) ? $"legacy_file_{i + 1}" : title)
+                    : fileName;
+
+                var item = new VaultFileItem
+                {
+                    Id = id,
+                    FileName = finalName,
+                    ParentPath = string.Empty,
+                    IsFolder = false,
+                    AddedTicks = metadata.CreatedTicks,
+                    Content = Array.Empty<byte>(),
+                    ContentChunks = new List<byte[]>(),
+                    ContentLengthOverride = contentLen
+                };
+
+                FileContentHandle handle = ReadStandardPayloadToHandle(
+                    reader,
+                    id,
+                    finalName,
+                    contentLen,
+                    sessionDirectory);
+
+                handles[id] = handle;
+                files.Add(item);
+                ReportProgress(progress, itemEndPercent);
+            }
+
+            EnsureNoTrailingData(input);
+            metadata.Version = PlaintextFormatVersionStandard;
+            ReportProgress(progress, 100);
+            return new OpenSessionData(
+                new VaultContent { Metadata = metadata, Files = files },
+                handles);
+        }
+
+        private static VaultFileItem ReadCommonItemMetadata(BinaryReader reader)
+        {
+            return new VaultFileItem
+            {
+                Id = new Guid(ReadExactly(reader.BaseStream, 16, VaultText.T("core.serializer.fileIdIncomplete"))),
+                FileName = reader.ReadString(),
+                ParentPath = NormalizePath(reader.ReadString()),
+                IsFolder = reader.ReadBoolean(),
+                AddedTicks = reader.ReadInt64(),
+                Content = Array.Empty<byte>(),
+                ContentChunks = new List<byte[]>()
+            };
+        }
+
+        private static FileContentHandle ReadStandardPayloadToHandle(
+            BinaryReader reader,
+            Guid itemId,
+            string fileName,
+            int contentLength,
+            string sessionDirectory)
+        {
+            if (contentLength <= 0)
+                return FileContentHandle.Empty();
+
+            string tempPath = BuildSessionFilePath(sessionDirectory, itemId, fileName);
+            using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferSize, FileOptions.SequentialScan))
+            {
+                CopyExactly(
+                    reader.BaseStream,
+                    output,
+                    contentLength,
+                    VaultText.T("core.serializer.fileContentIncomplete"));
+            }
+
+            return FileContentHandle.FromTemporaryFile(tempPath, contentLength);
+        }
+
+        private static FileContentHandle ReadUltraPayloadToHandle(
+            BinaryReader reader,
+            Guid itemId,
+            string fileName,
+            long contentLength,
+            int chunkCount,
+            string sessionDirectory)
+        {
+            if (contentLength == 0)
+            {
+                long skipped = 0;
+                for (int chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
+                {
+                    int chunkLen = reader.ReadInt32();
+                    if (chunkLen < 0)
+                        throw new CryptographicException(VaultText.T("core.serializer.chunkSizeInvalid"));
+                    if (chunkLen > 0)
+                    {
+                        CopyExactly(
+                            reader.BaseStream,
+                            Stream.Null,
+                            chunkLen,
+                            VaultText.T("core.serializer.chunkIncomplete"));
+                        skipped += chunkLen;
+                    }
+                }
+
+                if (skipped != 0)
+                    throw new CryptographicException(VaultText.T("core.serializer.contentLengthMismatch"));
+
+                return FileContentHandle.Empty();
+            }
+
+            string tempPath = BuildSessionFilePath(sessionDirectory, itemId, fileName);
+            long copied = 0;
+            using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferSize, FileOptions.SequentialScan))
+            {
+                for (int chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
+                {
+                    int chunkLen = reader.ReadInt32();
+                    if (chunkLen < 0)
+                        throw new CryptographicException(VaultText.T("core.serializer.chunkSizeInvalid"));
+
+                    if (chunkLen == 0)
+                        continue;
+
+                    CopyExactly(
+                        reader.BaseStream,
+                        output,
+                        chunkLen,
+                        VaultText.T("core.serializer.chunkIncomplete"));
+                    copied += chunkLen;
+                }
+            }
+
+            if (copied != contentLength)
+                throw new CryptographicException(VaultText.T("core.serializer.contentLengthMismatch"));
+
+            return FileContentHandle.FromTemporaryFile(tempPath, contentLength);
+        }
+
+        private static Dictionary<Guid, FileContentHandle> BuildHandlesFromInMemoryContent(
+            VaultContent content,
+            string sessionDirectory)
+        {
+            var handles = new Dictionary<Guid, FileContentHandle>();
+            foreach (VaultFileItem item in content.Files)
+            {
+                if (item.IsFolder)
+                {
+                    item.ContentLengthOverride = 0;
+                    continue;
+                }
+
+                long contentLength = item.ContentLength;
+                if (contentLength == 0)
+                {
+                    item.ContentLengthOverride = 0;
+                    handles[item.Id] = FileContentHandle.Empty();
+                    continue;
+                }
+
+                string tempPath = BuildSessionFilePath(sessionDirectory, item.Id, item.FileName);
+                using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferSize, FileOptions.SequentialScan))
+                {
+                    foreach (byte[] chunk in item.GetContentChunks())
+                    {
+                        if (chunk.Length == 0)
+                            continue;
+
+                        output.Write(chunk, 0, chunk.Length);
+                    }
+                }
+
+                handles[item.Id] = FileContentHandle.FromTemporaryFile(tempPath, contentLength);
+                ClearItemPayload(item);
+                item.ContentLengthOverride = contentLength;
+            }
+
+            return handles;
+        }
+
+        private FileContentHandle CreateHandleFromStream(
+            Guid itemId,
+            string fileName,
+            Stream source,
+            long contentLength)
+        {
+            if (contentLength == 0)
+                return FileContentHandle.Empty();
+
+            string tempPath = BuildSessionFilePath(_sessionDirectory, itemId, fileName);
+            using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferSize, FileOptions.SequentialScan))
+            {
+                CopyExactly(
+                    source,
+                    output,
+                    contentLength,
+                    VaultText.T("core.serializer.fileContentIncomplete"));
+            }
+
+            return FileContentHandle.FromTemporaryFile(tempPath, contentLength);
+        }
+
+        private Stream OpenContentReadStream(VaultFileItem file)
+        {
+            if (_fileContent.TryGetValue(file.Id, out FileContentHandle? handle))
+                return handle.OpenRead();
+
+            long length = file.ContentLength;
+            if (length == 0)
+                return Stream.Null;
+
+            if (!file.HasChunkedContent)
+                return new MemoryStream(file.Content ?? Array.Empty<byte>(), writable: false);
+
+            if (length > int.MaxValue)
+                throw new InvalidOperationException(VaultText.F("core.error.fileTooLargeForFormat", file.FileName));
+
+            var ms = new MemoryStream((int)length);
+            foreach (byte[] chunk in file.GetContentChunks())
+            {
+                if (chunk.Length == 0)
+                    continue;
+                ms.Write(chunk, 0, chunk.Length);
+            }
+
+            ms.Position = 0;
+            return ms;
+        }
+
+        private static string BuildSessionFilePath(string sessionDirectory, Guid id, string? fileName)
+        {
+            string extension = Path.GetExtension(fileName ?? string.Empty);
+            if (string.IsNullOrWhiteSpace(extension) || extension.Length > 16)
+                extension = ".bin";
+
+            return Path.Combine(sessionDirectory, $"{id:N}{extension}");
+        }
+
+        private static string CreateSessionDirectory()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "vault-portable");
+            Directory.CreateDirectory(root);
+
+            string session = Path.Combine(root, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(session);
+            return session;
+        }
+
+        private static void CleanupSessionDirectory(string sessionDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(sessionDirectory))
+                return;
+
+            try
+            {
+                if (Directory.Exists(sessionDirectory))
+                    Directory.Delete(sessionDirectory, recursive: true);
+            }
+            catch
+            {
+                // Best effort.
+            }
+        }
+
+        private static void CopyExactly(
+            Stream source,
+            Stream destination,
+            long bytesToCopy,
+            string errorMessage,
+            Action<int>? onChunkCopied = null)
+        {
+            if (bytesToCopy < 0)
+                throw new ArgumentOutOfRangeException(nameof(bytesToCopy));
+
+            byte[] buffer = new byte[CopyBufferSize];
+            long remaining = bytesToCopy;
+
+            while (remaining > 0)
+            {
+                int read = source.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining));
+                if (read <= 0)
+                    throw new CryptographicException(errorMessage);
+
+                destination.Write(buffer, 0, read);
+                remaining -= read;
+                onChunkCopied?.Invoke(read);
+            }
         }
 
         private static byte[] ReadExactly(Stream input, int length, string errorMessage)
@@ -536,7 +1247,7 @@ namespace vault.Core.Domain
             if (length < 0)
                 throw new ArgumentOutOfRangeException(nameof(length));
 
-            var buffer = new byte[length];
+            byte[] buffer = new byte[length];
             int offset = 0;
             while (offset < length)
             {
@@ -557,36 +1268,19 @@ namespace vault.Core.Domain
             return ms.ToArray();
         }
 
-        private sealed class FilePayload
+        private static void EnsureNoTrailingData(Stream stream)
         {
-            public FilePayload(byte[] content, List<byte[]> contentChunks)
+            if (stream.CanSeek)
             {
-                Content = content ?? Array.Empty<byte>();
-                ContentChunks = contentChunks ?? new List<byte[]>();
+                if (stream.Position != stream.Length)
+                    throw new CryptographicException(VaultText.T("core.serializer.trailingData"));
+
+                return;
             }
 
-            public byte[] Content { get; }
-            public List<byte[]> ContentChunks { get; }
-        }
-
-        private static FilePayload BuildPayloadFromBuffer(byte[] content, bool allowLargeSingleFile)
-        {
-            if (!allowLargeSingleFile || content.LongLength <= MaxStandardImportableFileBytes)
-                return new FilePayload(content, new List<byte[]>());
-
-            var chunks = new List<byte[]>();
-            int offset = 0;
-            while (offset < content.Length)
-            {
-                int size = Math.Min(UltraFileChunkSizeBytes, content.Length - offset);
-                var chunk = new byte[size];
-                Buffer.BlockCopy(content, offset, chunk, 0, size);
-                chunks.Add(chunk);
-                offset += size;
-            }
-
-            Array.Clear(content, 0, content.Length);
-            return new FilePayload(Array.Empty<byte>(), chunks);
+            int next = stream.ReadByte();
+            if (next != -1)
+                throw new CryptographicException(VaultText.T("core.serializer.trailingData"));
         }
 
         private static void ValidateItemSize(long sizeBytes, string itemName, bool allowLargeSingleFile)
@@ -596,6 +1290,42 @@ namespace vault.Core.Domain
 
             throw new InvalidOperationException(
                 VaultText.F("core.error.fileTooLargeForFormat", itemName));
+        }
+
+        private static void ClearItemPayload(VaultFileItem item)
+        {
+            if (item.Content.Length > 0)
+                Array.Clear(item.Content, 0, item.Content.Length);
+
+            if (item.ContentChunks.Count > 0)
+            {
+                foreach (byte[] chunk in item.ContentChunks)
+                {
+                    if (chunk.Length > 0)
+                        Array.Clear(chunk, 0, chunk.Length);
+                }
+
+                item.ContentChunks.Clear();
+            }
+
+            item.Content = Array.Empty<byte>();
+        }
+
+        private VaultFileItem GetFileItem(Guid fileId)
+        {
+            VaultFileItem? file = _content.Files.FirstOrDefault(f => f.Id == fileId);
+            if (file == null)
+                throw new FileNotFoundException(VaultText.T("core.error.fileNotFound"));
+            return file;
+        }
+
+        private void RemoveHandle(Guid fileId)
+        {
+            if (_fileContent.TryGetValue(fileId, out FileContentHandle? handle))
+            {
+                handle.Dispose();
+                _fileContent.Remove(fileId);
+            }
         }
 
         private bool FolderExists(string path)
@@ -762,9 +1492,91 @@ namespace vault.Core.Domain
 
             if (_sessionKey != null && _sessionKey.Length > 0)
                 Array.Clear(_sessionKey, 0, _sessionKey.Length);
-
             _sessionKey = null;
+
+            foreach (FileContentHandle handle in _fileContent.Values)
+                handle.Dispose();
+            _fileContent.Clear();
+
+            CleanupSessionDirectory(_sessionDirectory);
             _disposed = true;
+        }
+
+        private sealed class OpenSessionData
+        {
+            public OpenSessionData(VaultContent content, Dictionary<Guid, FileContentHandle> contentHandles)
+            {
+                Content = content ?? throw new ArgumentNullException(nameof(content));
+                ContentHandles = contentHandles ?? throw new ArgumentNullException(nameof(contentHandles));
+            }
+
+            public VaultContent Content { get; }
+            public Dictionary<Guid, FileContentHandle> ContentHandles { get; }
+        }
+
+        private sealed class FileContentHandle : IDisposable
+        {
+            private readonly string? _temporaryPath;
+            private readonly bool _deleteOnDispose;
+
+            private FileContentHandle(long length, string? temporaryPath, bool deleteOnDispose)
+            {
+                Length = length;
+                _temporaryPath = temporaryPath;
+                _deleteOnDispose = deleteOnDispose;
+            }
+
+            public long Length { get; }
+
+            public static FileContentHandle Empty()
+            {
+                return new FileContentHandle(0, null, deleteOnDispose: false);
+            }
+
+            public static FileContentHandle FromTemporaryFile(string temporaryPath, long length)
+            {
+                if (string.IsNullOrWhiteSpace(temporaryPath))
+                    throw new ArgumentException("Path non valido.", nameof(temporaryPath));
+                if (length < 0)
+                    throw new ArgumentOutOfRangeException(nameof(length));
+
+                return new FileContentHandle(length, temporaryPath, deleteOnDispose: true);
+            }
+
+            public Stream OpenRead()
+            {
+                if (Length == 0)
+                    return Stream.Null;
+
+                if (string.IsNullOrWhiteSpace(_temporaryPath))
+                    throw new FileNotFoundException(VaultText.T("core.error.fileNotFound"));
+                if (!File.Exists(_temporaryPath))
+                    throw new FileNotFoundException(VaultText.T("core.error.fileNotFound"), _temporaryPath);
+
+                return new FileStream(
+                    _temporaryPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    CopyBufferSize,
+                    FileOptions.SequentialScan);
+            }
+
+            public void Dispose()
+            {
+                if (!_deleteOnDispose || string.IsNullOrWhiteSpace(_temporaryPath))
+                    return;
+
+                try
+                {
+                    if (File.Exists(_temporaryPath))
+                        File.Delete(_temporaryPath);
+                }
+                catch
+                {
+                    // Best effort.
+                }
+            }
         }
     }
 }
