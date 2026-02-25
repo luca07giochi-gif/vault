@@ -346,6 +346,21 @@ namespace vault.Core.Domain
                 VaultText.T("core.serializer.fileContentIncomplete"));
         }
 
+        public bool TryGetLocalContentPath(Guid fileId, out string localPath)
+        {
+            ThrowIfDisposed();
+
+            localPath = string.Empty;
+            VaultFileItem file = GetFileItem(fileId);
+            if (file.IsFolder)
+                return false;
+
+            if (!_fileContent.TryGetValue(file.Id, out FileContentHandle? handle) || handle == null)
+                return false;
+
+            return handle.TryGetTemporaryPath(out localPath);
+        }
+
         public byte[] ExportVaultBytes(IProgress<double>? progress = null)
         {
             ThrowIfDisposed();
@@ -1191,6 +1206,26 @@ namespace vault.Core.Domain
             return Path.Combine(sessionDirectory, $"{id:N}{extension}");
         }
 
+        public static void CleanupStaleTemporarySessions()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "vault-portable");
+            if (!Directory.Exists(root))
+                return;
+
+            foreach (string sessionDirectory in Directory.GetDirectories(root))
+                CleanupSessionDirectory(sessionDirectory);
+
+            try
+            {
+                if (!Directory.EnumerateFileSystemEntries(root).Any())
+                    Directory.Delete(root, recursive: false);
+            }
+            catch
+            {
+                // Best effort.
+            }
+        }
+
         private static string CreateSessionDirectory()
         {
             string root = Path.Combine(Path.GetTempPath(), "vault-portable");
@@ -1560,6 +1595,18 @@ namespace vault.Core.Domain
                     FileShare.Read,
                     CopyBufferSize,
                     FileOptions.SequentialScan);
+            }
+
+            public bool TryGetTemporaryPath(out string temporaryPath)
+            {
+                temporaryPath = string.Empty;
+                if (Length <= 0 || string.IsNullOrWhiteSpace(_temporaryPath))
+                    return false;
+                if (!File.Exists(_temporaryPath))
+                    return false;
+
+                temporaryPath = _temporaryPath;
+                return true;
             }
 
             public void Dispose()

@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CoreGraphics;
 using Foundation;
+using ImageIO;
 using Photos;
 using PhotosUI;
 using UIKit;
@@ -17,6 +19,10 @@ namespace vault.iOS
         private const string CellId = "VaultItemCell";
         private const double LongPressSeconds = 0.45d;
         private const float BottomMenuHeight = 62f;
+        private const string RuntimeTempDirectoryName = "vault-ios-runtime";
+        private const int ThumbnailCacheLimit = 24;
+        private const int ThumbnailMaxPixelSize = 640;
+        private const int ThumbnailDecodeConcurrency = 2;
 
         private enum BrowserViewMode
         {
@@ -29,12 +35,14 @@ namespace vault.iOS
         private readonly HashSet<Guid> _selectedItemIds = new();
         private readonly Dictionary<Guid, UIImage> _thumbnailCache = new();
         private readonly HashSet<Guid> _thumbnailLoading = new();
+        private readonly SemaphoreSlim _thumbnailSemaphore = new(ThumbnailDecodeConcurrency, ThumbnailDecodeConcurrency);
 
         private VaultPortableReader? _session;
         private NSUrl? _vaultUrl;
         private string _currentFolder = string.Empty;
         private bool _isSelectionMode;
         private BrowserViewMode _viewMode = BrowserViewMode.List;
+        private int _thumbnailRequestVersion;
 
         private UITableView? _tableView;
         private UICollectionView? _collectionView;
@@ -58,6 +66,40 @@ namespace vault.iOS
         private DocumentInteractionDelegate? _documentInteractionDelegate;
         private PickerDelegate? _pickerDelegate;
         private GalleryMultiPickerDelegate? _galleryMultiPickerDelegate;
+        private string? _activePreviewTemporaryPath;
+
+        public static void CleanupStaleRuntimeTemporaryFiles()
+        {
+            string runtimeRoot = GetRuntimeTempDirectoryPath();
+            if (!Directory.Exists(runtimeRoot))
+                return;
+
+            try
+            {
+                Directory.Delete(runtimeRoot, recursive: true);
+            }
+            catch
+            {
+                // Best effort cleanup.
+            }
+        }
+
+        private static string GetRuntimeTempDirectoryPath()
+        {
+            return Path.Combine(Path.GetTempPath(), RuntimeTempDirectoryName);
+        }
+
+        public void OnAppDidEnterBackground()
+        {
+            ClearThumbnailCache();
+            ClearActivePreviewTemporaryFile();
+        }
+
+        public void OnAppWillTerminate()
+        {
+            CleanupTemporaryRuntimeFiles();
+            CloseCurrentVaultSession(reloadUi: false);
+        }
 
         public override void ViewDidLoad()
         {
@@ -189,6 +231,13 @@ namespace vault.iOS
             }
 
             UpdatePreviewLayout();
+        }
+
+        public override void DidReceiveMemoryWarning()
+        {
+            base.DidReceiveMemoryWarning();
+            ClearThumbnailCache();
+            _collectionView?.ReloadData();
         }
 
         private void SetupBottomMenu()
@@ -421,6 +470,7 @@ namespace vault.iOS
             if (_session == null || _isSelectionMode)
                 return;
 
+            Interlocked.Increment(ref _thumbnailRequestVersion);
             _viewMode = _viewMode == BrowserViewMode.List
                 ? BrowserViewMode.Preview
                 : BrowserViewMode.List;
@@ -452,21 +502,57 @@ namespace vault.iOS
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             alert.AddAction(UIAlertAction.Create("Chiudi", UIAlertActionStyle.Destructive, __ =>
             {
-                _session.Dispose();
-                _session = null;
-                _vaultUrl = null;
-                _currentFolder = string.Empty;
-                _selectedItemIds.Clear();
-                _thumbnailLoading.Clear();
-                foreach (UIImage image in _thumbnailCache.Values)
-                    image.Dispose();
-                _thumbnailCache.Clear();
-                _visibleItems.Clear();
-                _isSelectionMode = false;
-                ReloadFolderItems();
+                CloseCurrentVaultSession(reloadUi: true);
             }));
 
             PresentViewController(alert, true, null);
+        }
+
+        private void CloseCurrentVaultSession(bool reloadUi)
+        {
+            _session?.Dispose();
+            _session = null;
+            _vaultUrl = null;
+            _currentFolder = string.Empty;
+            _isSelectionMode = false;
+            _selectedItemIds.Clear();
+            _visibleItems.Clear();
+            ClearThumbnailCache();
+
+            if (reloadUi)
+                ReloadFolderItems();
+        }
+
+        private void ClearThumbnailCache()
+        {
+            Interlocked.Increment(ref _thumbnailRequestVersion);
+            _thumbnailLoading.Clear();
+            foreach (UIImage image in _thumbnailCache.Values)
+                image.Dispose();
+            _thumbnailCache.Clear();
+        }
+
+        private void CleanupTemporaryRuntimeFiles()
+        {
+            ClearActivePreviewTemporaryFile();
+            foreach (string path in _temporaryFiles.ToList())
+                DeleteTemporaryFile(path);
+        }
+
+        private void ClearActivePreviewTemporaryFile()
+        {
+            if (string.IsNullOrWhiteSpace(_activePreviewTemporaryPath))
+                return;
+
+            string path = _activePreviewTemporaryPath;
+            _activePreviewTemporaryPath = null;
+            DeleteTemporaryFile(path);
+        }
+
+        private void OnDocumentInteractionClosed()
+        {
+            _documentInteractionController = null;
+            ClearActivePreviewTemporaryFile();
         }
 
         private void HandleRenameRequest()
@@ -765,6 +851,22 @@ namespace vault.iOS
             _collectionView?.ReloadData();
         }
 
+        private void ReloadThumbnailCell(Guid itemId)
+        {
+            if (_collectionView == null || _viewMode != BrowserViewMode.Preview)
+                return;
+
+            int index = _visibleItems.FindIndex(item => item.Id == itemId);
+            if (index < 0)
+                return;
+
+            NSIndexPath[] visiblePaths = _collectionView.IndexPathsForVisibleItems ?? Array.Empty<NSIndexPath>();
+            if (!visiblePaths.Any(path => path.Section == 0 && path.Item == index))
+                return;
+
+            _collectionView.ReloadItems(new[] { NSIndexPath.FromItemSection(index, 0) });
+        }
+
         private async Task PickVaultToOpenAsync()
         {
             PresentDocumentPicker(
@@ -973,6 +1075,7 @@ namespace vault.iOS
 
         private void ReloadFolderItems()
         {
+            Interlocked.Increment(ref _thumbnailRequestVersion);
             EnsureCurrentFolderStillExists();
             _visibleItems.Clear();
 
@@ -1231,19 +1334,25 @@ namespace vault.iOS
             if (view == null)
                 return;
 
+            ClearActivePreviewTemporaryFile();
+            _activePreviewTemporaryPath = localPath;
+
             NSUrl fileUrl = NSUrl.FromFilename(localPath);
-            _documentInteractionDelegate ??= new DocumentInteractionDelegate(this);
+            _documentInteractionDelegate ??= new DocumentInteractionDelegate(this, OnDocumentInteractionClosed);
             _documentInteractionController = UIDocumentInteractionController.FromUrl(fileUrl);
             _documentInteractionController.Delegate = _documentInteractionDelegate;
 
             bool previewShown = _documentInteractionController.PresentPreview(true);
-            if (!previewShown)
-            {
-                _documentInteractionController.PresentOptionsMenu(
-                    new CGRect(view.Bounds.GetMidX(), view.Bounds.GetMidY(), 1, 1),
-                    view,
-                    true);
-            }
+            if (previewShown)
+                return;
+
+            bool menuShown = _documentInteractionController.PresentOptionsMenu(
+                new CGRect(view.Bounds.GetMidX(), view.Bounds.GetMidY(), 1, 1),
+                view,
+                true);
+
+            if (!menuShown)
+                OnDocumentInteractionClosed();
         }
 
         private void PresentShareSheet(string localPath)
@@ -1282,6 +1391,9 @@ namespace vault.iOS
         {
             if (string.IsNullOrWhiteSpace(path))
                 return;
+
+            if (string.Equals(path, _activePreviewTemporaryPath, StringComparison.OrdinalIgnoreCase))
+                _activePreviewTemporaryPath = null;
 
             _temporaryFiles.Remove(path);
             try
@@ -1403,7 +1515,9 @@ namespace vault.iOS
         {
             string extension = Path.GetExtension(originalFileName ?? string.Empty);
             string tempName = $"{Guid.NewGuid():N}{extension}";
-            return Path.Combine(Path.GetTempPath(), tempName);
+            string runtimeRoot = GetRuntimeTempDirectoryPath();
+            Directory.CreateDirectory(runtimeRoot);
+            return Path.Combine(runtimeRoot, tempName);
         }
 
         private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password)
@@ -1498,14 +1612,30 @@ namespace vault.iOS
 
         private void QueueThumbnailGeneration(VaultFileItem item)
         {
-            if (_session == null || item.IsFolder || !IsImagePreviewCandidate(item.FileName))
+            if (_session == null || _viewMode != BrowserViewMode.Preview || item.IsFolder || !IsImagePreviewCandidate(item.FileName))
                 return;
             if (_thumbnailCache.ContainsKey(item.Id))
                 return;
             if (!_thumbnailLoading.Add(item.Id))
                 return;
 
-            _ = Task.Run(() => BuildThumbnailImageForItem(item))
+            int requestVersion = Volatile.Read(ref _thumbnailRequestVersion);
+
+            _ = Task.Run(async () =>
+                {
+                    await _thumbnailSemaphore.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        if (requestVersion != Volatile.Read(ref _thumbnailRequestVersion))
+                            return null;
+
+                        return BuildThumbnailImageForItem(item);
+                    }
+                    finally
+                    {
+                        _thumbnailSemaphore.Release();
+                    }
+                })
                 .ContinueWith(task =>
                 {
                     BeginInvokeOnMainThread(() =>
@@ -1518,7 +1648,9 @@ namespace vault.iOS
                         if (thumb == null)
                             return;
 
-                        if (_session == null || _visibleItems.All(visible => visible.Id != item.Id))
+                        if (_session == null ||
+                            requestVersion != Volatile.Read(ref _thumbnailRequestVersion) ||
+                            _visibleItems.All(visible => visible.Id != item.Id))
                         {
                             thumb.Dispose();
                             return;
@@ -1527,7 +1659,7 @@ namespace vault.iOS
                         if (_thumbnailCache.TryGetValue(item.Id, out UIImage? old))
                             old.Dispose();
 
-                        if (!_thumbnailCache.ContainsKey(item.Id) && _thumbnailCache.Count >= 60)
+                        if (!_thumbnailCache.ContainsKey(item.Id) && _thumbnailCache.Count >= ThumbnailCacheLimit)
                         {
                             Guid removeId = _thumbnailCache.Keys.First();
                             _thumbnailCache[removeId].Dispose();
@@ -1535,7 +1667,7 @@ namespace vault.iOS
                         }
 
                         _thumbnailCache[item.Id] = thumb;
-                        _collectionView?.ReloadData();
+                        ReloadThumbnailCell(item.Id);
                     });
                 });
         }
@@ -1546,16 +1678,21 @@ namespace vault.iOS
             if (session == null)
                 return null;
 
-            string tempPath = CreateTemporaryPath(item.FileName);
+            bool deleteTempAfterUse = false;
+            string sourcePath = string.Empty;
             try
             {
-                using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                if (!session.TryGetLocalContentPath(item.Id, out sourcePath))
                 {
-                    session.CopyFileContentToStream(item.Id, output);
+                    sourcePath = CreateTemporaryPath(item.FileName);
+                    deleteTempAfterUse = true;
+                    using (var output = new FileStream(sourcePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        session.CopyFileContentToStream(item.Id, output);
+                    }
                 }
 
-                UIImage? image = UIImage.FromFile(tempPath);
-                return image?.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+                return CreateDownsampledThumbnail(sourcePath, ThumbnailMaxPixelSize);
             }
             catch
             {
@@ -1563,8 +1700,36 @@ namespace vault.iOS
             }
             finally
             {
-                TryDeletePath(tempPath);
+                if (deleteTempAfterUse)
+                    TryDeletePath(sourcePath);
             }
+        }
+
+        private static UIImage? CreateDownsampledThumbnail(string sourcePath, int maxPixelSize)
+        {
+            if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+                return null;
+
+            NSUrl fileUrl = NSUrl.FromFilename(sourcePath);
+            using CGImageSource? imageSource = CGImageSource.FromUrl(fileUrl, new CGImageOptions
+            {
+                ShouldCache = false
+            });
+            if (imageSource == null || imageSource.ImageCount == 0)
+                return null;
+
+            using CGImage? cgImage = imageSource.CreateThumbnail(0, new CGImageThumbnailOptions
+            {
+                CreateThumbnailFromImageAlways = true,
+                CreateThumbnailWithTransform = true,
+                MaxPixelSize = maxPixelSize,
+                ShouldCache = false,
+                ShouldCacheImmediately = false
+            });
+            if (cgImage == null)
+                return null;
+
+            return UIImage.FromImage(cgImage).ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
         }
 
         private static bool IsImagePreviewCandidate(string? fileName)
@@ -1577,16 +1742,8 @@ namespace vault.iOS
         {
             if (disposing)
             {
-                foreach (string path in _temporaryFiles.ToList())
-                    DeleteTemporaryFile(path);
-
-                foreach (UIImage image in _thumbnailCache.Values)
-                    image.Dispose();
-                _thumbnailCache.Clear();
-                _thumbnailLoading.Clear();
-
-                _session?.Dispose();
-                _session = null;
+                CleanupTemporaryRuntimeFiles();
+                CloseCurrentVaultSession(reloadUi: false);
             }
 
             base.Dispose(disposing);
@@ -2168,15 +2325,32 @@ namespace vault.iOS
         private sealed class DocumentInteractionDelegate : UIDocumentInteractionControllerDelegate
         {
             private readonly UIViewController _owner;
+            private readonly Action _onClosed;
 
-            public DocumentInteractionDelegate(UIViewController owner)
+            public DocumentInteractionDelegate(UIViewController owner, Action onClosed)
             {
                 _owner = owner;
+                _onClosed = onClosed;
             }
 
             public override UIViewController ViewControllerForPreview(UIDocumentInteractionController controller)
             {
                 return _owner;
+            }
+
+            public override void DidEndPreview(UIDocumentInteractionController controller)
+            {
+                _onClosed();
+            }
+
+            public override void DidDismissOptionsMenu(UIDocumentInteractionController controller)
+            {
+                _onClosed();
+            }
+
+            public override void DidDismissOpenInMenu(UIDocumentInteractionController controller)
+            {
+                _onClosed();
             }
         }
 
