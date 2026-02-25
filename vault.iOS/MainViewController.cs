@@ -39,6 +39,7 @@ namespace vault.iOS
 
         private VaultPortableReader? _session;
         private NSUrl? _vaultUrl;
+        private string _sessionPassword = string.Empty;
         private string _currentFolder = string.Empty;
         private bool _isSelectionMode;
         private BrowserViewMode _viewMode = BrowserViewMode.List;
@@ -513,6 +514,7 @@ namespace vault.iOS
             _session?.Dispose();
             _session = null;
             _vaultUrl = null;
+            _sessionPassword = string.Empty;
             _currentFolder = string.Empty;
             _isSelectionMode = false;
             _selectedItemIds.Clear();
@@ -638,6 +640,11 @@ namespace vault.iOS
             if (_session != null)
             {
                 sheet.AddAction(UIAlertAction.Create("Struttura cartelle", UIAlertActionStyle.Default, __ => OpenFolderTreePage()));
+                sheet.AddAction(UIAlertAction.Create(
+                    $"Formato vault: {GetStorageFormatLabel(_session.StorageFormat)}",
+                    UIAlertActionStyle.Default,
+                    __ => OpenStorageFormatMenu()));
+                sheet.AddAction(UIAlertAction.Create("Cambia password", UIAlertActionStyle.Default, __ => PromptChangePassword()));
 
                 string selectLabel = _isSelectionMode ? "Fine selezione" : "Selezione multipla";
                 sheet.AddAction(UIAlertAction.Create(selectLabel, UIAlertActionStyle.Default, __ =>
@@ -664,6 +671,199 @@ namespace vault.iOS
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             ConfigurePopover(sheet);
             PresentViewController(sheet, true, null);
+        }
+
+        private static string GetStorageFormatLabel(VaultStorageFormat format)
+        {
+            return format switch
+            {
+                VaultStorageFormat.Legacy => "Legacy",
+                VaultStorageFormat.Ultra => "Ultra",
+                _ => "Esteso"
+            };
+        }
+
+        private void OpenStorageFormatMenu()
+        {
+            if (_session == null)
+                return;
+
+            VaultStorageFormat current = _session.StorageFormat;
+            UIAlertController sheet = UIAlertController.Create(
+                "Formato vault",
+                $"Formato attuale: {GetStorageFormatLabel(current)}",
+                UIAlertControllerStyle.ActionSheet);
+
+            VaultStorageFormat[] formats =
+            {
+                VaultStorageFormat.Legacy,
+                VaultStorageFormat.Extended,
+                VaultStorageFormat.Ultra
+            };
+
+            foreach (VaultStorageFormat format in formats)
+            {
+                string label = GetStorageFormatLabel(format);
+                if (format == current)
+                    label += " (attuale)";
+
+                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, __ =>
+                {
+                    if (format == current)
+                        return;
+
+                    _ = ChangeStorageFormatAsync(format);
+                }));
+            }
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private async Task ChangeStorageFormatAsync(VaultStorageFormat newFormat)
+        {
+            if (_session == null)
+                return;
+            if (_session.StorageFormat == newFormat)
+                return;
+            if (_vaultUrl == null)
+            {
+                ShowError("File vault non disponibile.");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(_sessionPassword))
+            {
+                ShowError("Password sessione non disponibile. Riapri il vault.");
+                return;
+            }
+
+            await RunBusyAsync($"Cambio formato in {GetStorageFormatLabel(newFormat)}...", async () =>
+            {
+                if (_session == null)
+                    return;
+
+                string rollbackPassword = _sessionPassword;
+                string rollbackFolder = _currentFolder;
+
+                _session.ChangeStorageFormat(newFormat);
+                try
+                {
+                    await PersistVaultAsync();
+                }
+                catch
+                {
+                    await RestoreSessionFromDiskAsync(rollbackPassword, rollbackFolder);
+                    throw;
+                }
+
+                ReloadFolderItems();
+            });
+        }
+
+        private void PromptChangePassword()
+        {
+            if (_session == null)
+                return;
+            if (string.IsNullOrWhiteSpace(_sessionPassword))
+            {
+                ShowError("Password sessione non disponibile. Riapri il vault.");
+                return;
+            }
+
+            UIAlertController alert = UIAlertController.Create(
+                "Cambia password",
+                "Inserisci la nuova password",
+                UIAlertControllerStyle.Alert);
+
+            alert.AddTextField(field =>
+            {
+                field.Placeholder = "Nuova password";
+                field.SecureTextEntry = true;
+            });
+            alert.AddTextField(field =>
+            {
+                field.Placeholder = "Conferma password";
+                field.SecureTextEntry = true;
+            });
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            alert.AddAction(UIAlertAction.Create("Conferma", UIAlertActionStyle.Default, __ =>
+            {
+                string newPassword = alert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
+                string confirmPassword = alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(newPassword))
+                {
+                    ShowError("Inserisci una nuova password valida.");
+                    return;
+                }
+
+                if (!string.Equals(newPassword, confirmPassword, StringComparison.Ordinal))
+                {
+                    ShowError("Le password non coincidono.");
+                    return;
+                }
+
+                _ = ChangePasswordAsync(newPassword);
+            }));
+
+            PresentViewController(alert, true, null);
+        }
+
+        private async Task ChangePasswordAsync(string newPassword)
+        {
+            if (_session == null)
+                return;
+            if (_vaultUrl == null)
+            {
+                ShowError("File vault non disponibile.");
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(_sessionPassword))
+            {
+                ShowError("Password sessione non disponibile. Riapri il vault.");
+                return;
+            }
+
+            await RunBusyAsync("Aggiornamento password...", async () =>
+            {
+                if (_session == null)
+                    return;
+
+                string rollbackPassword = _sessionPassword;
+                string rollbackFolder = _currentFolder;
+
+                _session.ChangePassword(newPassword);
+                try
+                {
+                    await PersistVaultAsync();
+                }
+                catch
+                {
+                    await RestoreSessionFromDiskAsync(rollbackPassword, rollbackFolder);
+                    throw;
+                }
+
+                _sessionPassword = newPassword;
+            });
+        }
+
+        private async Task RestoreSessionFromDiskAsync(string password, string folderPath)
+        {
+            if (_vaultUrl == null)
+                throw new InvalidOperationException("File vault non disponibile.");
+
+            VaultPortableReader restored = await Task.Run(() => OpenVaultReader(_vaultUrl, password));
+
+            _session?.Dispose();
+            _session = restored;
+            _sessionPassword = password;
+            _currentFolder = NormalizeFolderPath(folderPath);
+            _isSelectionMode = false;
+            _selectedItemIds.Clear();
+            ClearThumbnailCache();
+            ReloadFolderItems();
         }
 
         private void OnFolderTreeClosed(string selectedFolderPath, bool hasChanges)
@@ -1013,6 +1213,7 @@ namespace vault.iOS
                 _session?.Dispose();
                 _session = reader;
                 _vaultUrl = vaultUrl;
+                _sessionPassword = password;
                 _currentFolder = string.Empty;
                 _isSelectionMode = false;
                 _selectedItemIds.Clear();
@@ -1470,7 +1671,9 @@ namespace vault.iOS
                     if (string.IsNullOrWhiteSpace(extension))
                         extension = GuessExtensionForMediaType(typeIdentifier);
 
-                    string tempPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}{extension}");
+                    string runtimeRoot = GetRuntimeTempDirectoryPath();
+                    Directory.CreateDirectory(runtimeRoot);
+                    string tempPath = Path.Combine(runtimeRoot, $"{Guid.NewGuid():N}{extension}");
                     File.Copy(sourcePath, tempPath, overwrite: true);
                     tcs.TrySetResult(tempPath);
                 }

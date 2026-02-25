@@ -19,8 +19,8 @@ namespace vault.Core.Domain
         private const int CopyBufferSize = 256 * 1024;
 
         private readonly VaultContent _content;
-        private readonly VaultStorageFormat _storageFormat;
-        private readonly byte[] _salt;
+        private VaultStorageFormat _storageFormat;
+        private byte[] _salt;
         private readonly string _sessionDirectory;
         private readonly Dictionary<Guid, FileContentHandle> _fileContent = new();
         private byte[]? _sessionKey;
@@ -344,6 +344,61 @@ namespace vault.Core.Domain
                 destination,
                 contentLength,
                 VaultText.T("core.serializer.fileContentIncomplete"));
+        }
+
+        public void ChangePassword(string newPassword)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrWhiteSpace(newPassword))
+                throw new ArgumentException(VaultText.T("core.error.invalidNewPassword"), nameof(newPassword));
+
+            byte[] pwdBytes = Encoding.UTF8.GetBytes(newPassword);
+            byte[] newSalt = VaultFileFormat.GenerateSalt();
+            byte[] newSessionKey = Array.Empty<byte>();
+            byte[]? previousSessionKey = _sessionKey;
+            byte[] previousSalt = _salt;
+
+            try
+            {
+                newSessionKey = KeyDerivation.DeriveKey(pwdBytes, newSalt);
+                _sessionKey = newSessionKey;
+                _salt = newSalt;
+                IsDirty = true;
+
+                if (previousSessionKey != null && !ReferenceEquals(previousSessionKey, newSessionKey))
+                    Array.Clear(previousSessionKey, 0, previousSessionKey.Length);
+            }
+            catch
+            {
+                if (newSessionKey.Length > 0)
+                    Array.Clear(newSessionKey, 0, newSessionKey.Length);
+
+                _sessionKey = previousSessionKey;
+                _salt = previousSalt;
+                throw;
+            }
+            finally
+            {
+                Array.Clear(pwdBytes, 0, pwdBytes.Length);
+            }
+        }
+
+        public void ChangeStorageFormat(VaultStorageFormat newFormat)
+        {
+            ThrowIfDisposed();
+
+            if (newFormat != VaultStorageFormat.Legacy &&
+                newFormat != VaultStorageFormat.Extended &&
+                newFormat != VaultStorageFormat.Ultra)
+            {
+                throw new ArgumentOutOfRangeException(nameof(newFormat), VaultText.T("core.error.unsupportedStorageFormat"));
+            }
+
+            if (_storageFormat == newFormat)
+                return;
+
+            _storageFormat = newFormat;
+            IsDirty = true;
         }
 
         public bool TryGetLocalContentPath(Guid fileId, out string localPath)
