@@ -27,4 +27,10 @@
     <ProjectReference Include="..\vault.Core\vault.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <BundleResource Include="Resources\AppIcon\*.png">
+      <LogicalName>%(Filename)%(Extension)</LogicalName>
+    </BundleResource>
+  </ItemGroup>
+
 </Project>

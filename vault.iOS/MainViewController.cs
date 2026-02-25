@@ -16,6 +16,7 @@ namespace vault.iOS
     {
         private const string CellId = "VaultItemCell";
         private const double LongPressSeconds = 0.45d;
+        private const float BottomMenuHeight = 62f;
 
         private enum BrowserViewMode
         {
@@ -26,6 +27,8 @@ namespace vault.iOS
         private readonly List<VaultFileItem> _visibleItems = new();
         private readonly HashSet<string> _temporaryFiles = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<Guid> _selectedItemIds = new();
+        private readonly Dictionary<Guid, UIImage> _thumbnailCache = new();
+        private readonly HashSet<Guid> _thumbnailLoading = new();
 
         private VaultPortableReader? _session;
         private NSUrl? _vaultUrl;
@@ -36,17 +39,17 @@ namespace vault.iOS
         private UITableView? _tableView;
         private UICollectionView? _collectionView;
         private UILabel? _emptyLabel;
+        private UIButton? _openVaultCenteredButton;
+        private UITabBar? _bottomTabBar;
+        private UITabBarItem? _vaultTabItem;
+        private UITabBarItem? _addTabItem;
+        private UITabBarItem? _viewTabItem;
+        private UITabBarItem? _renameTabItem;
+        private UITabBarItem? _settingsTabItem;
         private UIView? _busyOverlay;
         private UIActivityIndicatorView? _busyIndicator;
         private UILabel? _busyLabel;
 
-        private UIBarButtonItem? _openVaultButton;
-        private UIBarButtonItem? _addFileButton;
-        private UIBarButtonItem? _viewModeButton;
-        private UIBarButtonItem? _upButton;
-        private UIBarButtonItem? _selectionDoneButton;
-        private UIBarButtonItem? _batchMoveButton;
-        private UIBarButtonItem? _batchDeleteButton;
         private UIButton? _pathTitleButton;
         private UILongPressGestureRecognizer? _tableLongPressRecognizer;
         private UILongPressGestureRecognizer? _collectionLongPressRecognizer;
@@ -111,6 +114,16 @@ namespace vault.iOS
             };
             View.AddSubview(_emptyLabel);
 
+            _openVaultCenteredButton = new UIButton(UIButtonType.System);
+            _openVaultCenteredButton.SetTitle("Apri vault", UIControlState.Normal);
+            _openVaultCenteredButton.SetTitleColor(UIColor.White, UIControlState.Normal);
+            _openVaultCenteredButton.BackgroundColor = UIColor.FromRGB(10, 132, 255);
+            _openVaultCenteredButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
+            _openVaultCenteredButton.Layer.CornerRadius = 13f;
+            _openVaultCenteredButton.TouchUpInside += (_, _) => _ = PickVaultToOpenAsync();
+            View.AddSubview(_openVaultCenteredButton);
+
+            SetupBottomMenu();
             BuildBusyOverlay();
             ConfigureNavigationItems();
             UpdateUiState();
@@ -140,7 +153,110 @@ namespace vault.iOS
                 _busyLabel.Frame = new CGRect(centerX - labelWidth / 2f, centerY + 8f, labelWidth, labelHeight);
             }
 
+            if (_bottomTabBar != null)
+            {
+                nfloat totalHeight = BottomMenuHeight + view.SafeAreaInsets.Bottom;
+                _bottomTabBar.Frame = new CGRect(0, view.Bounds.Height - totalHeight, view.Bounds.Width, totalHeight);
+            }
+
+            nfloat bottomInset = (_bottomTabBar != null && !_bottomTabBar.Hidden)
+                ? _bottomTabBar.Frame.Height
+                : 0f;
+
+            if (_tableView != null)
+            {
+                _tableView.ContentInset = new UIEdgeInsets(0, 0, bottomInset, 0);
+                _tableView.ScrollIndicatorInsets = new UIEdgeInsets(0, 0, bottomInset, 0);
+            }
+
+            if (_collectionView != null)
+            {
+                _collectionView.ContentInset = new UIEdgeInsets(0, 0, bottomInset, 0);
+                _collectionView.ScrollIndicatorInsets = new UIEdgeInsets(0, 0, bottomInset, 0);
+            }
+
+            if (_openVaultCenteredButton != null)
+            {
+                nfloat buttonWidth = Math.Min(view.Bounds.Width - 40f, 250f);
+                nfloat buttonHeight = 54f;
+                _openVaultCenteredButton.Frame = new CGRect(
+                    (view.Bounds.Width - buttonWidth) / 2f,
+                    (view.Bounds.Height - buttonHeight) / 2f,
+                    buttonWidth,
+                    buttonHeight);
+            }
+
             UpdatePreviewLayout();
+        }
+
+        private void SetupBottomMenu()
+        {
+            _vaultTabItem = new UITabBarItem("Apri", UIImage.GetSystemImage("lock.open"), 0);
+            _addTabItem = new UITabBarItem("Aggiungi", UIImage.GetSystemImage("plus.circle"), 1);
+            _viewTabItem = new UITabBarItem("Vista", UIImage.GetSystemImage("square.grid.2x2"), 2);
+            _renameTabItem = new UITabBarItem("Rinomina", UIImage.GetSystemImage("pencil"), 3);
+            _settingsTabItem = new UITabBarItem("Impostazioni", UIImage.GetSystemImage("gearshape"), 4);
+
+            _bottomTabBar = new UITabBar
+            {
+                Translucent = false,
+                BarTintColor = UIColor.FromRGB(249, 249, 252),
+                TintColor = UIColor.FromRGB(10, 132, 255),
+                Items = new[]
+                {
+                    _vaultTabItem,
+                    _addTabItem,
+                    _viewTabItem,
+                    _renameTabItem,
+                    _settingsTabItem
+                }
+            };
+
+            _bottomTabBar.ItemSelected += (_, item) => HandleBottomMenuSelection(item);
+            View?.AddSubview(_bottomTabBar);
+        }
+
+        private void HandleBottomMenuSelection(UITabBarItem? item)
+        {
+            if (_bottomTabBar != null)
+                _bottomTabBar.SelectedItem = null;
+            if (item == null)
+                return;
+
+            if (ReferenceEquals(item, _vaultTabItem))
+            {
+                if (_session == null)
+                    _ = PickVaultToOpenAsync();
+                else
+                    PromptCloseVault();
+                return;
+            }
+
+            if (_session == null)
+                return;
+
+            if (ReferenceEquals(item, _addTabItem))
+            {
+                _ = PickAddSourceAsync();
+                return;
+            }
+
+            if (ReferenceEquals(item, _viewTabItem))
+            {
+                ToggleViewMode();
+                return;
+            }
+
+            if (ReferenceEquals(item, _renameTabItem))
+            {
+                HandleRenameRequest();
+                return;
+            }
+
+            if (ReferenceEquals(item, _settingsTabItem))
+            {
+                OpenSettingsMenu();
+            }
         }
 
         private void BuildBusyOverlay()
@@ -177,55 +293,18 @@ namespace vault.iOS
 
         private void ConfigureNavigationItems()
         {
-            _openVaultButton = new UIBarButtonItem(
-                "Apri vault",
-                UIBarButtonItemStyle.Plain,
-                (_, _) => _ = PickVaultToOpenAsync());
-
-            _addFileButton = new UIBarButtonItem(
-                "Aggiungi",
-                UIBarButtonItemStyle.Plain,
-                (_, _) => _ = PickAddSourceAsync());
-
-            _viewModeButton = new UIBarButtonItem(
-                "Anteprime",
-                UIBarButtonItemStyle.Plain,
-                (_, _) => ToggleViewMode());
-
-            _upButton = new UIBarButtonItem(
-                "Su",
-                UIBarButtonItemStyle.Plain,
-                (_, _) => NavigateUp());
-
-            _selectionDoneButton = new UIBarButtonItem(
-                "Fine",
-                UIBarButtonItemStyle.Plain,
-                (_, _) => ExitSelectionMode(clearSelection: true));
-
-            _batchMoveButton = new UIBarButtonItem(
-                "Sposta",
-                UIBarButtonItemStyle.Plain,
-                (_, _) => PromptMoveSelectedItems());
-
-            _batchDeleteButton = new UIBarButtonItem(
-                "Elimina",
-                UIBarButtonItemStyle.Plain,
-                (_, _) => PromptDeleteSelectedItems());
-
             _pathTitleButton = new UIButton(UIButtonType.System);
             _pathTitleButton.SetTitle("Cassaforte iOS", UIControlState.Normal);
             _pathTitleButton.TitleLabel!.Font = UIFont.SystemFontOfSize(17, UIFontWeight.Semibold);
             _pathTitleButton.TouchUpInside += (_, _) => OpenFolderTreePage();
             NavigationItem.TitleView = _pathTitleButton;
-
-            NavigationItem.LeftBarButtonItem = _openVaultButton;
-            RefreshNavigationItems();
+            NavigationItem.LeftBarButtonItem = null;
+            NavigationItem.RightBarButtonItems = Array.Empty<UIBarButtonItem>();
         }
 
         private void UpdateUiState()
         {
             bool hasVault = _session != null;
-            bool canGoUp = hasVault && !string.IsNullOrWhiteSpace(_currentFolder);
             string titlePath = hasVault
                 ? (string.IsNullOrWhiteSpace(_currentFolder) ? "/" : $"/{_currentFolder}")
                 : "Cassaforte iOS";
@@ -239,71 +318,67 @@ namespace vault.iOS
                 _pathTitleButton.SizeToFit();
             }
 
+            if (_vaultTabItem != null)
+            {
+                _vaultTabItem.Title = hasVault ? "Chiudi" : "Apri";
+                _vaultTabItem.Image = UIImage.GetSystemImage(hasVault ? "lock.slash" : "lock.open");
+            }
+
+            if (_viewTabItem != null)
+            {
+                _viewTabItem.Title = _viewMode == BrowserViewMode.List ? "Anteprime" : "Elenco";
+                _viewTabItem.Image = UIImage.GetSystemImage(_viewMode == BrowserViewMode.List ? "square.grid.2x2" : "list.bullet");
+            }
+
+            if (_bottomTabBar != null)
+                _bottomTabBar.Hidden = !hasVault;
+
+            if (_openVaultCenteredButton != null)
+                _openVaultCenteredButton.Hidden = hasVault;
+
             if (!hasVault)
             {
+                _isSelectionMode = false;
+                _selectedItemIds.Clear();
+                if (_tableView != null)
+                    _tableView.Hidden = true;
+                if (_collectionView != null)
+                    _collectionView.Hidden = true;
                 if (_emptyLabel != null)
-                {
-                    _emptyLabel.Hidden = false;
-                    _emptyLabel.Text = "Tocca \"Apri vault\" per selezionare un file .vault.";
-                }
+                    _emptyLabel.Hidden = true;
+                RefreshNavigationItems();
+                View?.SetNeedsLayout();
+                return;
             }
-            else if (_emptyLabel != null)
+
+            if (_emptyLabel != null)
             {
                 _emptyLabel.Hidden = _visibleItems.Count > 0;
                 _emptyLabel.Text = "Cartella vuota.";
             }
 
-            if (_addFileButton != null)
-                _addFileButton.Enabled = hasVault && !_isSelectionMode;
-
-            if (_upButton != null)
-                _upButton.Enabled = canGoUp && !_isSelectionMode;
-
-            if (_viewModeButton != null)
-            {
-                _viewModeButton.Enabled = hasVault && !_isSelectionMode;
-                _viewModeButton.Title = _viewMode == BrowserViewMode.List ? "Anteprime" : "Elenco";
-            }
-
             ApplyViewModeVisibility();
             RefreshNavigationItems();
+            View?.SetNeedsLayout();
         }
 
         private void RefreshNavigationItems()
         {
-            if (_isSelectionMode)
-            {
-                if (_openVaultButton != null)
-                    _openVaultButton.Enabled = false;
-
-                if (_batchMoveButton != null)
-                    _batchMoveButton.Enabled = _selectedItemIds.Count > 0;
-
-                if (_batchDeleteButton != null)
-                    _batchDeleteButton.Enabled = _selectedItemIds.Count > 0;
-
-                NavigationItem.RightBarButtonItems = new[]
-                {
-                    _selectionDoneButton,
-                    _batchMoveButton,
-                    _batchDeleteButton
-                }.Where(b => b != null).Cast<UIBarButtonItem>().ToArray();
-                return;
-            }
-
-            if (_openVaultButton != null)
-                _openVaultButton.Enabled = true;
-
-            NavigationItem.RightBarButtonItems = new[]
-            {
-                _addFileButton,
-                _viewModeButton,
-                _upButton
-            }.Where(b => b != null).Cast<UIBarButtonItem>().ToArray();
+            NavigationItem.LeftBarButtonItem = null;
+            NavigationItem.RightBarButtonItems = Array.Empty<UIBarButtonItem>();
         }
 
         private void ApplyViewModeVisibility()
         {
+            if (_session == null)
+            {
+                if (_tableView != null)
+                    _tableView.Hidden = true;
+                if (_collectionView != null)
+                    _collectionView.Hidden = true;
+                return;
+            }
+
             bool showPreview = _viewMode == BrowserViewMode.Preview;
 
             if (_tableView != null)
@@ -336,6 +411,9 @@ namespace vault.iOS
 
         private void ToggleViewMode()
         {
+            if (_session == null || _isSelectionMode)
+                return;
+
             _viewMode = _viewMode == BrowserViewMode.List
                 ? BrowserViewMode.Preview
                 : BrowserViewMode.List;
@@ -352,6 +430,147 @@ namespace vault.iOS
 
             var tree = new FolderTreeViewController(_session, _currentFolder, OnFolderTreeClosed);
             NavigationController.PushViewController(tree, true);
+        }
+
+        private void PromptCloseVault()
+        {
+            if (_session == null)
+                return;
+
+            UIAlertController alert = UIAlertController.Create(
+                "Chiudi vault",
+                "Vuoi chiudere il vault corrente?",
+                UIAlertControllerStyle.Alert);
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            alert.AddAction(UIAlertAction.Create("Chiudi", UIAlertActionStyle.Destructive, __ =>
+            {
+                _session.Dispose();
+                _session = null;
+                _vaultUrl = null;
+                _currentFolder = string.Empty;
+                _selectedItemIds.Clear();
+                _thumbnailLoading.Clear();
+                foreach (UIImage image in _thumbnailCache.Values)
+                    image.Dispose();
+                _thumbnailCache.Clear();
+                _visibleItems.Clear();
+                _isSelectionMode = false;
+                ReloadFolderItems();
+            }));
+
+            PresentViewController(alert, true, null);
+        }
+
+        private void HandleRenameRequest()
+        {
+            if (_session == null)
+                return;
+
+            if (_selectedItemIds.Count == 1)
+            {
+                Guid selectedId = _selectedItemIds.First();
+                VaultFileItem? selected = _visibleItems.FirstOrDefault(item => item.Id == selectedId)
+                    ?? _session.Files.FirstOrDefault(item => item.Id == selectedId);
+                if (selected != null)
+                {
+                    PromptRename(selected);
+                    return;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(_currentFolder))
+            {
+                PromptRenameCurrentFolder();
+                return;
+            }
+
+            ShowError("Per rinominare seleziona un elemento o entra in una cartella.");
+        }
+
+        private void PromptRenameCurrentFolder()
+        {
+            if (_session == null || string.IsNullOrWhiteSpace(_currentFolder))
+                return;
+
+            VaultFileItem? folder = _session.Files.FirstOrDefault(item =>
+                item.IsFolder &&
+                string.Equals(item.FullPath, _currentFolder, StringComparison.OrdinalIgnoreCase));
+            if (folder == null)
+            {
+                ShowError("Cartella corrente non trovata.");
+                return;
+            }
+
+            UIAlertController alert = UIAlertController.Create("Rinomina cartella", null, UIAlertControllerStyle.Alert);
+            alert.AddTextField(field =>
+            {
+                field.Text = folder.FileName;
+                field.ClearButtonMode = UITextFieldViewMode.WhileEditing;
+            });
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            alert.AddAction(UIAlertAction.Create("Conferma", UIAlertActionStyle.Default, __ =>
+            {
+                string newName = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
+                _ = RunBusyAsync("Rinomina cartella...", async () =>
+                {
+                    if (_session == null)
+                        return;
+
+                    Guid folderId = folder.Id;
+                    _session.RenameItem(folderId, newName);
+                    await PersistVaultAsync();
+
+                    VaultFileItem? renamed = _session.Files.FirstOrDefault(item => item.Id == folderId);
+                    if (renamed != null)
+                        _currentFolder = renamed.FullPath;
+
+                    ReloadFolderItems();
+                });
+            }));
+
+            PresentViewController(alert, true, null);
+        }
+
+        private void OpenSettingsMenu()
+        {
+            UIAlertController sheet = UIAlertController.Create("Impostazioni", null, UIAlertControllerStyle.ActionSheet);
+
+            if (_session != null && !string.IsNullOrWhiteSpace(_currentFolder))
+            {
+                sheet.AddAction(UIAlertAction.Create("Vai su", UIAlertActionStyle.Default, __ => NavigateUp()));
+            }
+
+            if (_session != null)
+            {
+                sheet.AddAction(UIAlertAction.Create("Struttura cartelle", UIAlertActionStyle.Default, __ => OpenFolderTreePage()));
+
+                string selectLabel = _isSelectionMode ? "Fine selezione" : "Selezione multipla";
+                sheet.AddAction(UIAlertAction.Create(selectLabel, UIAlertActionStyle.Default, __ =>
+                {
+                    if (_isSelectionMode)
+                    {
+                        ExitSelectionMode(clearSelection: true);
+                    }
+                    else
+                    {
+                        _isSelectionMode = true;
+                        UpdateUiState();
+                        ReloadVisibleData();
+                    }
+                }));
+
+                if (_isSelectionMode && _selectedItemIds.Count > 0)
+                {
+                    sheet.AddAction(UIAlertAction.Create("Sposta selezione", UIAlertActionStyle.Default, __ => PromptMoveSelectedItems()));
+                    sheet.AddAction(UIAlertAction.Create("Elimina selezione", UIAlertActionStyle.Destructive, __ => PromptDeleteSelectedItems()));
+                }
+            }
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
         }
 
         private void OnFolderTreeClosed(string selectedFolderPath, bool hasChanges)
@@ -688,6 +907,10 @@ namespace vault.iOS
                 _currentFolder = string.Empty;
                 _isSelectionMode = false;
                 _selectedItemIds.Clear();
+                _thumbnailLoading.Clear();
+                foreach (UIImage image in _thumbnailCache.Values)
+                    image.Dispose();
+                _thumbnailCache.Clear();
 
                 ReloadFolderItems();
             });
@@ -750,6 +973,17 @@ namespace vault.iOS
             {
                 _visibleItems.AddRange(_session.GetItemsInFolder(_currentFolder));
             }
+
+            HashSet<Guid> visibleIds = _visibleItems.Select(item => item.Id).ToHashSet();
+            foreach (Guid id in _thumbnailCache.Keys.ToList())
+            {
+                if (visibleIds.Contains(id))
+                    continue;
+
+                _thumbnailCache[id].Dispose();
+                _thumbnailCache.Remove(id);
+            }
+            _thumbnailLoading.RemoveWhere(id => !visibleIds.Contains(id));
 
             _selectedItemIds.RemoveWhere(id => _visibleItems.All(item => item.Id != id));
             if (_isSelectionMode && _selectedItemIds.Count == 0)
@@ -1243,12 +1477,106 @@ namespace vault.iOS
             _ = OpenItemActionsAsync(item);
         }
 
+        private UIImage? GetOrQueueThumbnail(VaultFileItem item)
+        {
+            if (item.IsFolder || !IsImagePreviewCandidate(item.FileName))
+                return null;
+
+            if (_thumbnailCache.TryGetValue(item.Id, out UIImage? existing))
+                return existing;
+
+            QueueThumbnailGeneration(item);
+            return null;
+        }
+
+        private void QueueThumbnailGeneration(VaultFileItem item)
+        {
+            if (_session == null || item.IsFolder || !IsImagePreviewCandidate(item.FileName))
+                return;
+            if (_thumbnailCache.ContainsKey(item.Id))
+                return;
+            if (!_thumbnailLoading.Add(item.Id))
+                return;
+
+            _ = Task.Run(() => BuildThumbnailImageForItem(item))
+                .ContinueWith(task =>
+                {
+                    BeginInvokeOnMainThread(() =>
+                    {
+                        _thumbnailLoading.Remove(item.Id);
+                        if (task.Status != TaskStatus.RanToCompletion)
+                            return;
+
+                        UIImage? thumb = task.Result;
+                        if (thumb == null)
+                            return;
+
+                        if (_session == null || _visibleItems.All(visible => visible.Id != item.Id))
+                        {
+                            thumb.Dispose();
+                            return;
+                        }
+
+                        if (_thumbnailCache.TryGetValue(item.Id, out UIImage? old))
+                            old.Dispose();
+
+                        if (!_thumbnailCache.ContainsKey(item.Id) && _thumbnailCache.Count >= 60)
+                        {
+                            Guid removeId = _thumbnailCache.Keys.First();
+                            _thumbnailCache[removeId].Dispose();
+                            _thumbnailCache.Remove(removeId);
+                        }
+
+                        _thumbnailCache[item.Id] = thumb;
+                        _collectionView?.ReloadData();
+                    });
+                });
+        }
+
+        private UIImage? BuildThumbnailImageForItem(VaultFileItem item)
+        {
+            VaultPortableReader? session = _session;
+            if (session == null)
+                return null;
+
+            string tempPath = CreateTemporaryPath(item.FileName);
+            try
+            {
+                using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    session.CopyFileContentToStream(item.Id, output);
+                }
+
+                UIImage? image = UIImage.FromFile(tempPath);
+                return image?.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                TryDeletePath(tempPath);
+            }
+        }
+
+        private static bool IsImagePreviewCandidate(string? fileName)
+        {
+            string ext = (Path.GetExtension(fileName ?? string.Empty) ?? string.Empty).ToLowerInvariant();
+            return ext is ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".webp" or ".heic" or ".tif" or ".tiff";
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
             {
                 foreach (string path in _temporaryFiles.ToList())
                     DeleteTemporaryFile(path);
+
+                foreach (UIImage image in _thumbnailCache.Values)
+                    image.Dispose();
+                _thumbnailCache.Clear();
+                _thumbnailLoading.Clear();
 
                 _session?.Dispose();
                 _session = null;
@@ -1311,7 +1639,8 @@ namespace vault.iOS
                 var cell = (PreviewCell)collectionView.DequeueReusableCell(PreviewCell.CellReuseId, indexPath);
                 VaultFileItem item = _owner._visibleItems[indexPath.Row];
                 bool isSelected = _owner._selectedItemIds.Contains(item.Id);
-                cell.Configure(item, isSelected, _owner._isSelectionMode);
+                UIImage? thumbnail = _owner.GetOrQueueThumbnail(item);
+                cell.Configure(item, thumbnail, isSelected, _owner._isSelectionMode);
                 return cell;
             }
 
@@ -1406,10 +1735,22 @@ namespace vault.iOS
                 _selectionBadge.Frame = new CGRect(width - 28f, 8f, 20f, 20f);
             }
 
-            public void Configure(VaultFileItem item, bool isSelected, bool isSelectionMode)
+            public void Configure(VaultFileItem item, UIImage? thumbnail, bool isSelected, bool isSelectionMode)
             {
-                _iconView.Image = UIImage.GetSystemImage(GetSymbolName(item));
-                _iconView.TintColor = item.IsFolder ? UIColor.FromRGB(10, 132, 255) : UIColor.Gray;
+                if (thumbnail != null)
+                {
+                    _iconView.Image = thumbnail;
+                    _iconView.ContentMode = UIViewContentMode.ScaleAspectFill;
+                    _iconView.ClipsToBounds = true;
+                    _iconView.TintColor = UIColor.Clear;
+                }
+                else
+                {
+                    _iconView.Image = UIImage.GetSystemImage(GetSymbolName(item));
+                    _iconView.ContentMode = UIViewContentMode.ScaleAspectFit;
+                    _iconView.ClipsToBounds = false;
+                    _iconView.TintColor = item.IsFolder ? UIColor.FromRGB(10, 132, 255) : UIColor.Gray;
+                }
 
                 _titleLabel.Text = item.FileName;
                 _subtitleLabel.Text = item.IsFolder ? "Cartella" : item.SizeLabel;
