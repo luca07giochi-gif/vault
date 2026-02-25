@@ -1743,10 +1743,9 @@ namespace vault.iOS
             if (string.IsNullOrWhiteSpace(path))
                 throw new IOException("Percorso file non valido.");
 
-            string directory = Path.GetDirectoryName(path) ?? throw new IOException("Directory vault non valida.");
             string fileName = Path.GetFileName(path);
-            string tmpPath = Path.Combine(directory, $"{fileName}.{Guid.NewGuid():N}.tmp");
-            string backupPath = Path.Combine(directory, $"{fileName}.bak");
+            string tmpPath = CreateVaultWriteTempPath(fileName, ".tmp");
+            string backupPath = CreateVaultWriteTempPath(fileName, ".bak");
 
             try
             {
@@ -1759,39 +1758,33 @@ namespace vault.iOS
                 if (!File.Exists(path))
                 {
                     File.Move(tmpPath, path);
+                    TryDeletePath(backupPath);
                     return;
                 }
 
-                TryDeletePath(backupPath);
                 if (!TryReplaceFile(tmpPath, path, backupPath))
                 {
-                    File.Move(tmpPath, path, overwrite: true);
+                    if (!TryMoveWithOverwrite(tmpPath, path))
+                        OverwriteFileWithRollback(tmpPath, path, backupPath);
                 }
 
+                TryDeletePath(tmpPath);
                 TryDeletePath(backupPath);
             }
             catch
             {
                 TryDeletePath(tmpPath);
-
-                try
-                {
-                    bool destinationMissingOrEmpty =
-                        !File.Exists(path) ||
-                        new FileInfo(path).Length == 0;
-
-                    if (destinationMissingOrEmpty && File.Exists(backupPath))
-                    {
-                        File.Move(backupPath, path, overwrite: true);
-                    }
-                }
-                catch
-                {
-                    // Best effort rollback.
-                }
-
+                TryDeletePath(backupPath);
                 throw;
             }
+        }
+
+        private static string CreateVaultWriteTempPath(string baseFileName, string suffix)
+        {
+            string runtimeRoot = GetRuntimeTempDirectoryPath();
+            Directory.CreateDirectory(runtimeRoot);
+            string safeBaseName = string.IsNullOrWhiteSpace(baseFileName) ? "vault" : baseFileName;
+            return Path.Combine(runtimeRoot, $"{safeBaseName}.{Guid.NewGuid():N}{suffix}");
         }
 
         private static bool TryReplaceFile(string sourcePath, string destinationPath, string backupPath)
@@ -1812,6 +1805,67 @@ namespace vault.iOS
             catch (PlatformNotSupportedException)
             {
                 return false;
+            }
+        }
+
+        private static bool TryMoveWithOverwrite(string sourcePath, string destinationPath)
+        {
+            try
+            {
+                File.Move(sourcePath, destinationPath, overwrite: true);
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return false;
+            }
+        }
+
+        private static void OverwriteFileWithRollback(string sourcePath, string destinationPath, string backupPath)
+        {
+            bool hasBackup = false;
+
+            try
+            {
+                if (File.Exists(destinationPath))
+                {
+                    File.Copy(destinationPath, backupPath, overwrite: true);
+                    hasBackup = true;
+                }
+
+                using var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                using var output = new FileStream(destinationPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
+                output.SetLength(0);
+                input.CopyTo(output);
+                output.Flush(flushToDisk: true);
+            }
+            catch
+            {
+                if (hasBackup && File.Exists(backupPath))
+                {
+                    try
+                    {
+                        using var backupInput = new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                        using var restoreOutput = new FileStream(destinationPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
+                        restoreOutput.SetLength(0);
+                        backupInput.CopyTo(restoreOutput);
+                        restoreOutput.Flush(flushToDisk: true);
+                    }
+                    catch
+                    {
+                        // Best effort rollback.
+                    }
+                }
+
+                throw;
             }
         }
 
