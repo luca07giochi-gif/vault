@@ -1540,9 +1540,75 @@ namespace vault.iOS
             if (string.IsNullOrWhiteSpace(path))
                 throw new IOException("Percorso file non valido.");
 
-            using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            string directory = Path.GetDirectoryName(path) ?? throw new IOException("Directory vault non valida.");
+            string fileName = Path.GetFileName(path);
+            string tmpPath = Path.Combine(directory, $"{fileName}.{Guid.NewGuid():N}.tmp");
+            string backupPath = Path.Combine(directory, $"{fileName}.bak");
+
+            try
             {
-                session.SaveToStream(output);
+                using (var output = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    session.SaveToStream(output);
+                    output.Flush(flushToDisk: true);
+                }
+
+                if (!File.Exists(path))
+                {
+                    File.Move(tmpPath, path);
+                    return;
+                }
+
+                TryDeletePath(backupPath);
+                if (!TryReplaceFile(tmpPath, path, backupPath))
+                {
+                    File.Move(tmpPath, path, overwrite: true);
+                }
+
+                TryDeletePath(backupPath);
+            }
+            catch
+            {
+                TryDeletePath(tmpPath);
+
+                try
+                {
+                    bool destinationMissingOrEmpty =
+                        !File.Exists(path) ||
+                        new FileInfo(path).Length == 0;
+
+                    if (destinationMissingOrEmpty && File.Exists(backupPath))
+                    {
+                        File.Move(backupPath, path, overwrite: true);
+                    }
+                }
+                catch
+                {
+                    // Best effort rollback.
+                }
+
+                throw;
+            }
+        }
+
+        private static bool TryReplaceFile(string sourcePath, string destinationPath, string backupPath)
+        {
+            try
+            {
+                File.Replace(sourcePath, destinationPath, backupPath, ignoreMetadataErrors: true);
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+            catch (PlatformNotSupportedException)
+            {
+                return false;
             }
         }
 
