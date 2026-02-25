@@ -177,7 +177,9 @@ namespace vault.iOS
 
             if (_openVaultCenteredButton != null)
             {
-                nfloat buttonWidth = Math.Min(view.Bounds.Width - 40f, 250f);
+                nfloat buttonWidth = view.Bounds.Width - (nfloat)40f;
+                if (buttonWidth > 250f)
+                    buttonWidth = 250f;
                 nfloat buttonHeight = 54f;
                 _openVaultCenteredButton.Frame = new CGRect(
                     (view.Bounds.Width - buttonWidth) / 2f,
@@ -212,8 +214,13 @@ namespace vault.iOS
                 }
             };
 
-            _bottomTabBar.ItemSelected += (_, item) => HandleBottomMenuSelection(item);
+            _bottomTabBar.ItemSelected += OnBottomTabBarItemSelected;
             View?.AddSubview(_bottomTabBar);
+        }
+
+        private void OnBottomTabBarItemSelected(object? sender, UITabBarItemEventArgs args)
+        {
+            HandleBottomMenuSelection(args.Item);
         }
 
         private void HandleBottomMenuSelection(UITabBarItem? item)
