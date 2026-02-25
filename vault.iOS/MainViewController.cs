@@ -91,7 +91,7 @@ namespace vault.iOS
                 AllowsSelection = true,
                 AllowsMultipleSelection = true
             };
-            _collectionView.RegisterClassForCell(typeof(PreviewCell), PreviewCell.ReuseIdentifier);
+            _collectionView.RegisterClassForCell(typeof(PreviewCell), PreviewCell.CellReuseId);
             _collectionLongPressRecognizer = new UILongPressGestureRecognizer(HandleCollectionLongPress)
             {
                 MinimumPressDuration = LongPressSeconds
@@ -216,7 +216,6 @@ namespace vault.iOS
             _pathTitleButton.SetTitle("Cassaforte iOS", UIControlState.Normal);
             _pathTitleButton.TitleLabel!.Font = UIFont.SystemFontOfSize(17, UIFontWeight.Semibold);
             _pathTitleButton.TouchUpInside += (_, _) => OpenFolderTreePage();
-            _pathTitleButton.ContentEdgeInsets = new UIEdgeInsets(4, 8, 4, 8);
             NavigationItem.TitleView = _pathTitleButton;
 
             NavigationItem.LeftBarButtonItem = _openVaultButton;
@@ -441,7 +440,7 @@ namespace vault.iOS
             foreach (string folder in folders)
             {
                 string label = string.IsNullOrWhiteSpace(folder) ? "/" : $"/{folder}";
-                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, _ =>
+                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, __ =>
                 {
                     _ = RunBusyAsync("Spostamento elementi...", async () =>
                     {
@@ -474,7 +473,7 @@ namespace vault.iOS
                 UIAlertControllerStyle.Alert);
 
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-            alert.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, _ =>
+            alert.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, __ =>
             {
                 _ = RunBusyAsync("Eliminazione elementi...", async () =>
                 {
@@ -1309,7 +1308,7 @@ namespace vault.iOS
 
             public override UICollectionViewCell GetCell(UICollectionView collectionView, NSIndexPath indexPath)
             {
-                var cell = (PreviewCell)collectionView.DequeueReusableCell(PreviewCell.ReuseIdentifier, indexPath);
+                var cell = (PreviewCell)collectionView.DequeueReusableCell(PreviewCell.CellReuseId, indexPath);
                 VaultFileItem item = _owner._visibleItems[indexPath.Row];
                 bool isSelected = _owner._selectedItemIds.Contains(item.Id);
                 cell.Configure(item, isSelected, _owner._isSelectionMode);
@@ -1325,7 +1324,7 @@ namespace vault.iOS
 
         private sealed class PreviewCell : UICollectionViewCell
         {
-            public static readonly NSString ReuseIdentifier = new("VaultPreviewCell");
+            public static readonly NSString CellReuseId = new("VaultPreviewCell");
 
             private readonly UIView _card = new();
             private readonly UIImageView _iconView = new();
@@ -1355,28 +1354,28 @@ namespace vault.iOS
                 BackgroundColor = UIColor.Clear;
                 ContentView.BackgroundColor = UIColor.Clear;
 
-                _card.BackgroundColor = UIColor.SecondarySystemBackgroundColor;
+                _card.BackgroundColor = UIColor.FromRGB(245, 245, 247);
                 _card.Layer.CornerRadius = 12f;
                 _card.Layer.BorderWidth = 1f;
-                _card.Layer.BorderColor = UIColor.SystemGray5Color.CGColor;
+                _card.Layer.BorderColor = UIColor.FromRGB(220, 220, 225).CGColor;
                 _card.ClipsToBounds = true;
 
                 _iconView.ContentMode = UIViewContentMode.ScaleAspectFit;
-                _iconView.TintColor = UIColor.SystemBlueColor;
+                _iconView.TintColor = UIColor.FromRGB(10, 132, 255);
 
                 _titleLabel.Font = UIFont.SystemFontOfSize(14, UIFontWeight.Semibold);
-                _titleLabel.TextColor = UIColor.LabelColor;
+                _titleLabel.TextColor = UIColor.Black;
                 _titleLabel.Lines = 2;
 
                 _subtitleLabel.Font = UIFont.SystemFontOfSize(12);
-                _subtitleLabel.TextColor = UIColor.SecondaryLabelColor;
+                _subtitleLabel.TextColor = UIColor.DarkGray;
                 _subtitleLabel.Lines = 1;
 
                 _selectionBadge.Hidden = true;
                 _selectionBadge.Font = UIFont.SystemFontOfSize(13, UIFontWeight.Bold);
                 _selectionBadge.TextAlignment = UITextAlignment.Center;
                 _selectionBadge.TextColor = UIColor.White;
-                _selectionBadge.BackgroundColor = UIColor.SystemBlueColor;
+                _selectionBadge.BackgroundColor = UIColor.FromRGB(10, 132, 255);
                 _selectionBadge.Layer.CornerRadius = 10f;
                 _selectionBadge.ClipsToBounds = true;
 
@@ -1410,15 +1409,17 @@ namespace vault.iOS
             public void Configure(VaultFileItem item, bool isSelected, bool isSelectionMode)
             {
                 _iconView.Image = UIImage.GetSystemImage(GetSymbolName(item));
-                _iconView.TintColor = item.IsFolder ? UIColor.SystemBlueColor : UIColor.SystemGrayColor;
+                _iconView.TintColor = item.IsFolder ? UIColor.FromRGB(10, 132, 255) : UIColor.Gray;
 
                 _titleLabel.Text = item.FileName;
                 _subtitleLabel.Text = item.IsFolder ? "Cartella" : item.SizeLabel;
 
                 _selectionBadge.Hidden = !isSelectionMode;
                 _selectionBadge.Text = isSelected ? "OK" : string.Empty;
-                _selectionBadge.BackgroundColor = isSelected ? UIColor.SystemBlueColor : UIColor.SystemGrayColor;
-                _card.Layer.BorderColor = isSelected ? UIColor.SystemBlueColor.CGColor : UIColor.SystemGray5Color.CGColor;
+                _selectionBadge.BackgroundColor = isSelected ? UIColor.FromRGB(10, 132, 255) : UIColor.Gray;
+                _card.Layer.BorderColor = isSelected
+                    ? UIColor.FromRGB(10, 132, 255).CGColor
+                    : UIColor.FromRGB(220, 220, 225).CGColor;
                 _card.Layer.BorderWidth = isSelected ? 2f : 1f;
             }
 
@@ -1468,7 +1469,7 @@ namespace vault.iOS
             {
                 base.ViewDidLoad();
 
-                View!.BackgroundColor = UIColor.SystemBackgroundColor;
+                View!.BackgroundColor = UIColor.White;
                 Title = "Cartelle vault";
                 NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
                 NavigationItem.RightBarButtonItem = new UIBarButtonItem(
