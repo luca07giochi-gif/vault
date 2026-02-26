@@ -479,7 +479,7 @@ namespace vault.iOS
             _pathTitleButton = new UIButton(UIButtonType.System);
             _pathTitleButton.SetTitle("Cassaforte iOS", UIControlState.Normal);
             _pathTitleButton.TitleLabel!.Font = UIFont.SystemFontOfSize(17, UIFontWeight.Semibold);
-            _pathTitleButton.TitleLabel.LineBreakMode = UILineBreakMode.TailTruncation;
+            _pathTitleButton.TitleLabel.LineBreakMode = UILineBreakMode.HeadTruncation;
             _pathTitleButton.HorizontalAlignment = UIControlContentHorizontalAlignment.Left;
             _pathTitleButton.TouchUpInside += (_, _) => OpenFolderTreePage();
 
@@ -517,11 +517,23 @@ namespace vault.iOS
             {
                 nfloat arrowSize = 22f;
                 nfloat spacing = 4f;
+                nfloat navBarWidth = NavigationController?.NavigationBar.Bounds.Width
+                    ?? View?.Bounds.Width
+                    ?? 320f;
+                nfloat reservedSideWidth = 192f;
+                nfloat maxContainerWidth = navBarWidth - reservedSideWidth;
+                if (maxContainerWidth < 90f)
+                    maxContainerWidth = 90f;
+
+                nfloat maxTitleWidth = maxContainerWidth - arrowSize - spacing;
+                if (maxTitleWidth < 44f)
+                    maxTitleWidth = 44f;
+
                 nfloat titleWidth = _pathTitleButton.Bounds.Width + 8f;
                 if (titleWidth < 44f)
                     titleWidth = 44f;
-                if (titleWidth > 248f)
-                    titleWidth = 248f;
+                if (titleWidth > maxTitleWidth)
+                    titleWidth = maxTitleWidth;
 
                 _pathNavigateUpButton.Frame = new CGRect(0, 5f, arrowSize, arrowSize);
                 _pathTitleButton.Frame = new CGRect(arrowSize + spacing, 0, titleWidth, 32f);
@@ -1365,11 +1377,14 @@ namespace vault.iOS
             if (index < 0)
                 return;
 
-            NSIndexPath[] visiblePaths = _collectionView.IndexPathsForVisibleItems ?? Array.Empty<NSIndexPath>();
-            if (!visiblePaths.Any(path => path.Section == 0 && path.Item == index))
+            NSIndexPath indexPath = NSIndexPath.FromItemSection(index, 0);
+            if (_collectionView.CellForItem(indexPath) is not PreviewCell cell)
                 return;
 
-            _collectionView.ReloadItems(new[] { NSIndexPath.FromItemSection(index, 0) });
+            VaultFileItem item = _visibleItems[index];
+            bool isSelected = _selectedItemIds.Contains(item.Id);
+            UIImage? thumbnail = _thumbnailCache.TryGetValue(item.Id, out UIImage? cached) ? cached : null;
+            cell.Configure(item, thumbnail, isSelected, _isSelectionMode);
         }
 
         private void PrefetchNearbyThumbnails()
@@ -2321,8 +2336,79 @@ namespace vault.iOS
             if (_thumbnailCache.TryGetValue(item.Id, out UIImage? existing))
                 return existing;
 
+            UIImage? fromDisk = TryLoadThumbnailFromDisk(item.Id);
+            if (fromDisk != null)
+            {
+                StoreThumbnailInMemoryCache(item.Id, fromDisk);
+                return fromDisk;
+            }
+
             QueueThumbnailGeneration(item);
             return null;
+        }
+
+        private void StoreThumbnailInMemoryCache(Guid itemId, UIImage image)
+        {
+            if (_thumbnailCache.TryGetValue(itemId, out UIImage? previous))
+            {
+                _thumbnailCache[itemId] = image;
+                if (!ReferenceEquals(previous, image) && !IsPreviewItemVisible(itemId))
+                    previous.Dispose();
+                return;
+            }
+
+            EvictThumbnailFromMemoryCacheIfNeeded(itemId);
+            _thumbnailCache[itemId] = image;
+        }
+
+        private void EvictThumbnailFromMemoryCacheIfNeeded(Guid preserveItemId)
+        {
+            if (_thumbnailMemoryCacheLimit <= 0 || _thumbnailCache.Count < _thumbnailMemoryCacheLimit)
+                return;
+
+            HashSet<Guid> protectedIds = GetVisiblePreviewItemIds();
+            protectedIds.Add(preserveItemId);
+
+            Guid? removeId = null;
+            foreach (Guid candidate in _thumbnailCache.Keys)
+            {
+                if (protectedIds.Contains(candidate))
+                    continue;
+
+                removeId = candidate;
+                break;
+            }
+
+            if (removeId == null)
+                return;
+
+            UIImage image = _thumbnailCache[removeId.Value];
+            _thumbnailCache.Remove(removeId.Value);
+            image.Dispose();
+        }
+
+        private bool IsPreviewItemVisible(Guid itemId)
+        {
+            return GetVisiblePreviewItemIds().Contains(itemId);
+        }
+
+        private HashSet<Guid> GetVisiblePreviewItemIds()
+        {
+            var visibleIds = new HashSet<Guid>();
+            if (_collectionView == null)
+                return visibleIds;
+
+            NSIndexPath[] visiblePaths = _collectionView.IndexPathsForVisibleItems ?? Array.Empty<NSIndexPath>();
+            foreach (NSIndexPath path in visiblePaths)
+            {
+                int index = (int)path.Item;
+                if (index < 0 || index >= _visibleItems.Count)
+                    continue;
+
+                visibleIds.Add(_visibleItems[index].Id);
+            }
+
+            return visibleIds;
         }
 
         private void QueueThumbnailGeneration(VaultFileItem item)
@@ -2371,17 +2457,7 @@ namespace vault.iOS
                             return;
                         }
 
-                        if (_thumbnailCache.TryGetValue(item.Id, out UIImage? old))
-                            old.Dispose();
-
-                        if (!_thumbnailCache.ContainsKey(item.Id) && _thumbnailCache.Count >= _thumbnailMemoryCacheLimit)
-                        {
-                            Guid removeId = _thumbnailCache.Keys.First();
-                            _thumbnailCache[removeId].Dispose();
-                            _thumbnailCache.Remove(removeId);
-                        }
-
-                        _thumbnailCache[item.Id] = thumb;
+                        StoreThumbnailInMemoryCache(item.Id, thumb);
                         ReloadThumbnailCell(item.Id);
                     });
                 });
