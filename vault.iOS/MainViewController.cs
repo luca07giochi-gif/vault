@@ -20,14 +20,28 @@ namespace vault.iOS
         private const double LongPressSeconds = 0.45d;
         private const float BottomMenuHeight = 62f;
         private const string RuntimeTempDirectoryName = "vault-ios-runtime";
-        private const int ThumbnailCacheLimit = 24;
+        private const string ThumbnailCacheDirectoryName = "thumbnails";
+        private const string PreviewPerformancePreferenceKey = "vault.ios.preview.performance";
+        private const string PreviewPerformanceFastValue = "fast";
+        private const string PreviewPerformanceCompactValue = "compact";
+        private const int ThumbnailCacheLimit = 36;
+        private const int ThumbnailDiskCacheFileLimit = 260;
+        private const int ThumbnailPrefetchPadding = 8;
+        private const int ThumbnailMinPixelSize = 240;
+        private const int ThumbnailDefaultPixelSize = 480;
         private const int ThumbnailMaxPixelSize = 640;
-        private const int ThumbnailDecodeConcurrency = 2;
+        private const int ThumbnailDecodeConcurrency = 4;
 
         private enum BrowserViewMode
         {
             List,
             Preview
+        }
+
+        private enum PreviewPerformanceMode
+        {
+            Fast,
+            Compact
         }
 
         private readonly List<VaultFileItem> _visibleItems = new();
@@ -36,6 +50,7 @@ namespace vault.iOS
         private readonly Dictionary<Guid, UIImage> _thumbnailCache = new();
         private readonly HashSet<Guid> _thumbnailLoading = new();
         private readonly SemaphoreSlim _thumbnailSemaphore = new(ThumbnailDecodeConcurrency, ThumbnailDecodeConcurrency);
+        private readonly object _thumbnailDiskCacheLock = new();
 
         private VaultPortableReader? _session;
         private NSUrl? _vaultUrl;
@@ -43,7 +58,14 @@ namespace vault.iOS
         private string _currentFolder = string.Empty;
         private bool _isSelectionMode;
         private BrowserViewMode _viewMode = BrowserViewMode.List;
+        private PreviewPerformanceMode _previewPerformanceMode = PreviewPerformanceMode.Fast;
         private int _thumbnailRequestVersion;
+        private int _thumbnailTargetPixelSize = ThumbnailDefaultPixelSize;
+        private int _thumbnailMemoryCacheLimit = ThumbnailCacheLimit;
+        private int _thumbnailDiskCacheFileLimit = ThumbnailDiskCacheFileLimit;
+        private int _thumbnailPrefetchPadding = ThumbnailPrefetchPadding;
+        private int _thumbnailMaxPixelSize = ThumbnailMaxPixelSize;
+        private bool _thumbnailDiskCacheEnabled = true;
 
         private UITableView? _tableView;
         private UICollectionView? _collectionView;
@@ -58,8 +80,12 @@ namespace vault.iOS
         private UIView? _busyOverlay;
         private UIActivityIndicatorView? _busyIndicator;
         private UILabel? _busyLabel;
+        private UIProgressView? _busyProgressView;
+        private UILabel? _busyProgressPercentLabel;
 
+        private UIView? _pathTitleContainer;
         private UIButton? _pathTitleButton;
+        private UIButton? _pathNavigateUpButton;
         private UILongPressGestureRecognizer? _tableLongPressRecognizer;
         private UILongPressGestureRecognizer? _collectionLongPressRecognizer;
 
@@ -90,6 +116,53 @@ namespace vault.iOS
             return Path.Combine(Path.GetTempPath(), RuntimeTempDirectoryName);
         }
 
+        private static string GetThumbnailCacheDirectoryPath()
+        {
+            return Path.Combine(GetRuntimeTempDirectoryPath(), ThumbnailCacheDirectoryName);
+        }
+
+        private void LoadPreviewPerformancePreference()
+        {
+            string? raw = NSUserDefaults.StandardUserDefaults.StringForKey(PreviewPerformancePreferenceKey);
+            PreviewPerformanceMode mode = string.Equals(raw, PreviewPerformanceCompactValue, StringComparison.OrdinalIgnoreCase)
+                ? PreviewPerformanceMode.Compact
+                : PreviewPerformanceMode.Fast;
+
+            ApplyPreviewPerformanceMode(mode, persist: false);
+        }
+
+        private void ApplyPreviewPerformanceMode(PreviewPerformanceMode mode, bool persist)
+        {
+            _previewPerformanceMode = mode;
+
+            if (mode == PreviewPerformanceMode.Fast)
+            {
+                _thumbnailDiskCacheEnabled = true;
+                _thumbnailMemoryCacheLimit = ThumbnailCacheLimit;
+                _thumbnailDiskCacheFileLimit = ThumbnailDiskCacheFileLimit;
+                _thumbnailPrefetchPadding = ThumbnailPrefetchPadding;
+                _thumbnailMaxPixelSize = ThumbnailMaxPixelSize;
+            }
+            else
+            {
+                _thumbnailDiskCacheEnabled = false;
+                _thumbnailMemoryCacheLimit = 18;
+                _thumbnailDiskCacheFileLimit = 0;
+                _thumbnailPrefetchPadding = 3;
+                _thumbnailMaxPixelSize = 480;
+                ClearThumbnailDiskCache();
+            }
+
+            if (persist)
+            {
+                NSUserDefaults defaults = NSUserDefaults.StandardUserDefaults;
+                defaults.SetString(
+                    mode == PreviewPerformanceMode.Fast ? PreviewPerformanceFastValue : PreviewPerformanceCompactValue,
+                    PreviewPerformancePreferenceKey);
+                defaults.Synchronize();
+            }
+        }
+
         public void OnAppDidEnterBackground()
         {
             ClearThumbnailCache();
@@ -105,6 +178,8 @@ namespace vault.iOS
         public override void ViewDidLoad()
         {
             base.ViewDidLoad();
+
+            LoadPreviewPerformancePreference();
 
             View!.BackgroundColor = UIColor.White;
 
@@ -188,12 +263,21 @@ namespace vault.iOS
             {
                 const float indicatorSize = 56f;
                 const float labelWidth = 280f;
-                const float labelHeight = 48f;
+                const float labelHeight = 42f;
+                const float progressWidth = 240f;
+                const float progressHeight = 4f;
+                const float percentHeight = 18f;
                 float centerX = (float)view.Bounds.GetMidX();
                 float centerY = (float)view.Bounds.GetMidY();
 
                 _busyIndicator.Frame = new CGRect(centerX - indicatorSize / 2f, centerY - 52f, indicatorSize, indicatorSize);
                 _busyLabel.Frame = new CGRect(centerX - labelWidth / 2f, centerY + 8f, labelWidth, labelHeight);
+
+                if (_busyProgressView != null)
+                    _busyProgressView.Frame = new CGRect(centerX - progressWidth / 2f, centerY + 58f, progressWidth, progressHeight);
+
+                if (_busyProgressPercentLabel != null)
+                    _busyProgressPercentLabel.Frame = new CGRect(centerX - 48f, centerY + 66f, 96f, percentHeight);
             }
 
             if (_bottomTabBar != null)
@@ -245,8 +329,8 @@ namespace vault.iOS
         {
             _vaultTabItem = new UITabBarItem("Apri", UIImage.GetSystemImage("lock.open"), 0);
             _addTabItem = new UITabBarItem("Aggiungi", UIImage.GetSystemImage("plus.circle"), 1);
-            _viewTabItem = new UITabBarItem("Vista", UIImage.GetSystemImage("square.grid.2x2"), 2);
-            _renameTabItem = new UITabBarItem("Rinomina", UIImage.GetSystemImage("pencil"), 3);
+            _viewTabItem = new UITabBarItem("Anteprime", UIImage.GetSystemImage("square.grid.2x2"), 2);
+            _renameTabItem = new UITabBarItem("Selezione", UIImage.GetSystemImage("checkmark.circle"), 3);
             _settingsTabItem = new UITabBarItem("Impostazioni", UIImage.GetSystemImage("gearshape"), 4);
 
             _bottomTabBar = new UITabBar
@@ -306,7 +390,7 @@ namespace vault.iOS
 
             if (ReferenceEquals(item, _renameTabItem))
             {
-                HandleRenameRequest();
+                ToggleSelectionModeFromBottomMenu();
                 return;
             }
 
@@ -314,6 +398,22 @@ namespace vault.iOS
             {
                 OpenSettingsMenu();
             }
+        }
+
+        private void ToggleSelectionModeFromBottomMenu()
+        {
+            if (_session == null)
+                return;
+
+            if (_isSelectionMode)
+            {
+                ExitSelectionMode(clearSelection: true);
+                return;
+            }
+
+            _isSelectionMode = true;
+            UpdateUiState();
+            ReloadVisibleData();
         }
 
         private void BuildBusyOverlay()
@@ -343,18 +443,50 @@ namespace vault.iOS
                 Text = "Operazione in corso..."
             };
 
+            _busyProgressView = new UIProgressView(UIProgressViewStyle.Default)
+            {
+                Progress = 0f,
+                Hidden = true,
+                TrackTintColor = UIColor.White.ColorWithAlpha(0.24f),
+                ProgressTintColor = UIColor.FromRGB(90, 200, 255)
+            };
+
+            _busyProgressPercentLabel = new UILabel
+            {
+                Font = UIFont.SystemFontOfSize(12, UIFontWeight.Semibold),
+                TextColor = UIColor.White,
+                TextAlignment = UITextAlignment.Center,
+                Hidden = true,
+                Text = "0%"
+            };
+
             _busyOverlay.AddSubview(_busyIndicator);
             _busyOverlay.AddSubview(_busyLabel);
+            _busyOverlay.AddSubview(_busyProgressView);
+            _busyOverlay.AddSubview(_busyProgressPercentLabel);
             view.AddSubview(_busyOverlay);
         }
 
         private void ConfigureNavigationItems()
         {
+            _pathTitleContainer = new UIView(new CGRect(0, 0, 240, 32));
+
+            _pathNavigateUpButton = new UIButton(UIButtonType.System);
+            _pathNavigateUpButton.SetImage(UIImage.GetSystemImage("chevron.up"), UIControlState.Normal);
+            _pathNavigateUpButton.TintColor = UIColor.FromRGB(10, 132, 255);
+            _pathNavigateUpButton.ContentEdgeInsets = new UIEdgeInsets(3f, 3f, 3f, 3f);
+            _pathNavigateUpButton.TouchUpInside += (_, _) => NavigateUp();
+
             _pathTitleButton = new UIButton(UIButtonType.System);
             _pathTitleButton.SetTitle("Cassaforte iOS", UIControlState.Normal);
             _pathTitleButton.TitleLabel!.Font = UIFont.SystemFontOfSize(17, UIFontWeight.Semibold);
+            _pathTitleButton.TitleLabel.LineBreakMode = UILineBreakMode.TailTruncation;
+            _pathTitleButton.HorizontalAlignment = UIControlContentHorizontalAlignment.Left;
             _pathTitleButton.TouchUpInside += (_, _) => OpenFolderTreePage();
-            NavigationItem.TitleView = _pathTitleButton;
+
+            _pathTitleContainer.AddSubview(_pathNavigateUpButton);
+            _pathTitleContainer.AddSubview(_pathTitleButton);
+            NavigationItem.TitleView = _pathTitleContainer;
             NavigationItem.LeftBarButtonItem = null;
             NavigationItem.RightBarButtonItems = Array.Empty<UIBarButtonItem>();
         }
@@ -375,6 +507,28 @@ namespace vault.iOS
                 _pathTitleButton.SizeToFit();
             }
 
+            if (_pathNavigateUpButton != null)
+            {
+                bool canNavigateUp = hasVault && !_isSelectionMode && !string.IsNullOrWhiteSpace(_currentFolder);
+                _pathNavigateUpButton.Enabled = canNavigateUp;
+                _pathNavigateUpButton.Alpha = canNavigateUp ? 1f : 0.38f;
+            }
+
+            if (_pathTitleContainer != null && _pathTitleButton != null && _pathNavigateUpButton != null)
+            {
+                nfloat arrowSize = 22f;
+                nfloat spacing = 4f;
+                nfloat titleWidth = _pathTitleButton.Bounds.Width + 8f;
+                if (titleWidth < 44f)
+                    titleWidth = 44f;
+                if (titleWidth > 248f)
+                    titleWidth = 248f;
+
+                _pathNavigateUpButton.Frame = new CGRect(0, 5f, arrowSize, arrowSize);
+                _pathTitleButton.Frame = new CGRect(arrowSize + spacing, 0, titleWidth, 32f);
+                _pathTitleContainer.Frame = new CGRect(0, 0, arrowSize + spacing + titleWidth, 32f);
+            }
+
             if (_vaultTabItem != null)
             {
                 _vaultTabItem.Title = hasVault ? "Chiudi" : "Apri";
@@ -383,8 +537,14 @@ namespace vault.iOS
 
             if (_viewTabItem != null)
             {
-                _viewTabItem.Title = _viewMode == BrowserViewMode.List ? "Anteprime" : "Elenco";
-                _viewTabItem.Image = UIImage.GetSystemImage(_viewMode == BrowserViewMode.List ? "square.grid.2x2" : "list.bullet");
+                _viewTabItem.Title = "Anteprime";
+                _viewTabItem.Image = UIImage.GetSystemImage("square.grid.2x2");
+            }
+
+            if (_renameTabItem != null)
+            {
+                _renameTabItem.Title = _isSelectionMode ? "Esci" : "Selezione";
+                _renameTabItem.Image = UIImage.GetSystemImage(_isSelectionMode ? "xmark.circle" : "checkmark.circle");
             }
 
             if (_bottomTabBar != null)
@@ -421,8 +581,27 @@ namespace vault.iOS
 
         private void RefreshNavigationItems()
         {
-            NavigationItem.LeftBarButtonItem = null;
-            NavigationItem.RightBarButtonItems = Array.Empty<UIBarButtonItem>();
+            if (_session == null)
+            {
+                NavigationItem.LeftBarButtonItem = null;
+                NavigationItem.RightBarButtonItems = Array.Empty<UIBarButtonItem>();
+                return;
+            }
+
+            NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
+                "Rinomina",
+                UIBarButtonItemStyle.Plain,
+                (_, _) => HandleRenameRequest());
+
+            UIBarButtonItem removeButton = new UIBarButtonItem(
+                "Rimuovi",
+                UIBarButtonItemStyle.Plain,
+                (_, _) => HandleTopRemoveRequest())
+            {
+                TintColor = UIColor.SystemRedColor
+            };
+
+            NavigationItem.RightBarButtonItems = new[] { removeButton };
         }
 
         private void ApplyViewModeVisibility()
@@ -443,6 +622,9 @@ namespace vault.iOS
 
             if (_collectionView != null)
                 _collectionView.Hidden = !showPreview;
+
+            if (showPreview)
+                PrefetchNearbyThumbnails();
         }
 
         private void UpdatePreviewLayout()
@@ -462,8 +644,19 @@ namespace vault.iOS
             if (cellWidth < 120f)
                 cellWidth = 120f;
 
+            nfloat scale = UIScreen.MainScreen.Scale;
+            int targetPixels = (int)Math.Ceiling(cellWidth * scale);
+            if (targetPixels < ThumbnailMinPixelSize)
+                targetPixels = ThumbnailMinPixelSize;
+            if (targetPixels > _thumbnailMaxPixelSize)
+                targetPixels = _thumbnailMaxPixelSize;
+            _thumbnailTargetPixelSize = targetPixels;
+
             flow.ItemSize = new CGSize(cellWidth, cellWidth + 52f);
             flow.InvalidateLayout();
+
+            if (_viewMode == BrowserViewMode.Preview)
+                PrefetchNearbyThumbnails();
         }
 
         private void ToggleViewMode()
@@ -520,6 +713,7 @@ namespace vault.iOS
             _selectedItemIds.Clear();
             _visibleItems.Clear();
             ClearThumbnailCache();
+            ClearThumbnailDiskCache();
 
             if (reloadUi)
                 ReloadFolderItems();
@@ -583,6 +777,32 @@ namespace vault.iOS
             ShowError("Per rinominare seleziona un elemento o entra in una cartella.");
         }
 
+        private void HandleTopRemoveRequest()
+        {
+            if (_session == null)
+                return;
+
+            if (_isSelectionMode)
+            {
+                if (_selectedItemIds.Count == 0)
+                {
+                    ShowError("Seleziona almeno un elemento da eliminare.");
+                    return;
+                }
+
+                PromptDeleteSelectedItems();
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_currentFolder))
+            {
+                PromptDeleteCurrentFolder();
+                return;
+            }
+
+            ShowError("Per rimuovere elementi attiva Selezione multipla.");
+        }
+
         private void PromptRenameCurrentFolder()
         {
             if (_session == null || string.IsNullOrWhiteSpace(_currentFolder))
@@ -628,6 +848,45 @@ namespace vault.iOS
             PresentViewController(alert, true, null);
         }
 
+        private void PromptDeleteCurrentFolder()
+        {
+            if (_session == null || string.IsNullOrWhiteSpace(_currentFolder))
+                return;
+
+            VaultFileItem? folder = _session.Files.FirstOrDefault(item =>
+                item.IsFolder &&
+                string.Equals(item.FullPath, _currentFolder, StringComparison.OrdinalIgnoreCase));
+            if (folder == null)
+            {
+                ShowError("Cartella corrente non trovata.");
+                return;
+            }
+
+            string parentFolder = folder.ParentPath;
+            UIAlertController alert = UIAlertController.Create(
+                "Rimuovi cartella",
+                $"Vuoi eliminare \"{folder.FileName}\" e il contenuto?",
+                UIAlertControllerStyle.Alert);
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            alert.AddAction(UIAlertAction.Create("Rimuovi", UIAlertActionStyle.Destructive, __ =>
+            {
+                _ = RunBusyAsync("Eliminazione cartella...", async () =>
+                {
+                    if (_session == null)
+                        return;
+
+                    _session.DeleteItems(new[] { folder.Id });
+                    await PersistVaultAsync();
+                    _currentFolder = NormalizeFolderPath(parentFolder);
+                    EnsureCurrentFolderStillExists();
+                    ReloadFolderItems();
+                });
+            }));
+
+            PresentViewController(alert, true, null);
+        }
+
         private void OpenSettingsMenu()
         {
             UIAlertController sheet = UIAlertController.Create("Impostazioni", null, UIAlertControllerStyle.ActionSheet);
@@ -641,25 +900,17 @@ namespace vault.iOS
             {
                 sheet.AddAction(UIAlertAction.Create("Struttura cartelle", UIAlertActionStyle.Default, __ => OpenFolderTreePage()));
                 sheet.AddAction(UIAlertAction.Create(
+                    $"Anteprime: {GetPreviewPerformanceLabel(_previewPerformanceMode)}",
+                    UIAlertActionStyle.Default,
+                    __ => OpenPreviewPerformanceMenu()));
+                sheet.AddAction(UIAlertAction.Create(
                     $"Formato vault: {GetStorageFormatLabel(_session.StorageFormat)}",
                     UIAlertActionStyle.Default,
                     __ => OpenStorageFormatMenu()));
                 sheet.AddAction(UIAlertAction.Create("Cambia password", UIAlertActionStyle.Default, __ => PromptChangePassword()));
 
                 string selectLabel = _isSelectionMode ? "Fine selezione" : "Selezione multipla";
-                sheet.AddAction(UIAlertAction.Create(selectLabel, UIAlertActionStyle.Default, __ =>
-                {
-                    if (_isSelectionMode)
-                    {
-                        ExitSelectionMode(clearSelection: true);
-                    }
-                    else
-                    {
-                        _isSelectionMode = true;
-                        UpdateUiState();
-                        ReloadVisibleData();
-                    }
-                }));
+                sheet.AddAction(UIAlertAction.Create(selectLabel, UIAlertActionStyle.Default, __ => ToggleSelectionModeFromBottomMenu()));
 
                 if (_isSelectionMode && _selectedItemIds.Count > 0)
                 {
@@ -671,6 +922,58 @@ namespace vault.iOS
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             ConfigurePopover(sheet);
             PresentViewController(sheet, true, null);
+        }
+
+        private static string GetPreviewPerformanceLabel(PreviewPerformanceMode mode)
+        {
+            return mode == PreviewPerformanceMode.Fast ? "Veloce" : "Compatta";
+        }
+
+        private void OpenPreviewPerformanceMenu()
+        {
+            UIAlertController sheet = UIAlertController.Create(
+                "Prestazioni anteprime",
+                "Veloce usa piu cache e spazio temporaneo. Compatta riduce cache e spazio.",
+                UIAlertControllerStyle.ActionSheet);
+
+            PreviewPerformanceMode[] modes =
+            {
+                PreviewPerformanceMode.Fast,
+                PreviewPerformanceMode.Compact
+            };
+
+            foreach (PreviewPerformanceMode mode in modes)
+            {
+                string label = GetPreviewPerformanceLabel(mode);
+                if (mode == _previewPerformanceMode)
+                    label += " (attuale)";
+
+                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, __ =>
+                {
+                    SetPreviewPerformanceMode(mode);
+                }));
+            }
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private void SetPreviewPerformanceMode(PreviewPerformanceMode mode)
+        {
+            if (_previewPerformanceMode == mode)
+                return;
+
+            ApplyPreviewPerformanceMode(mode, persist: true);
+            ClearThumbnailCache();
+            if (!_thumbnailDiskCacheEnabled)
+                ClearThumbnailDiskCache();
+
+            if (_viewMode == BrowserViewMode.Preview)
+            {
+                ReloadVisibleData();
+                BeginInvokeOnMainThread(PrefetchNearbyThumbnails);
+            }
         }
 
         private static string GetStorageFormatLabel(VaultStorageFormat format)
@@ -738,7 +1041,7 @@ namespace vault.iOS
                 return;
             }
 
-            await RunBusyAsync($"Cambio formato in {GetStorageFormatLabel(newFormat)}...", async () =>
+            await RunBusyWithProgressAsync($"Cambio formato in {GetStorageFormatLabel(newFormat)}...", async progress =>
             {
                 if (_session == null)
                     return;
@@ -749,7 +1052,7 @@ namespace vault.iOS
                 _session.ChangeStorageFormat(newFormat);
                 try
                 {
-                    await PersistVaultAsync();
+                    await PersistVaultAsync(progress);
                 }
                 catch
                 {
@@ -826,7 +1129,7 @@ namespace vault.iOS
                 return;
             }
 
-            await RunBusyAsync("Aggiornamento password...", async () =>
+            await RunBusyWithProgressAsync("Aggiornamento password...", async progress =>
             {
                 if (_session == null)
                     return;
@@ -837,7 +1140,7 @@ namespace vault.iOS
                 _session.ChangePassword(newPassword);
                 try
                 {
-                    await PersistVaultAsync();
+                    await PersistVaultAsync(progress);
                 }
                 catch
                 {
@@ -1049,6 +1352,9 @@ namespace vault.iOS
         {
             _tableView?.ReloadData();
             _collectionView?.ReloadData();
+
+            if (_viewMode == BrowserViewMode.Preview)
+                BeginInvokeOnMainThread(PrefetchNearbyThumbnails);
         }
 
         private void ReloadThumbnailCell(Guid itemId)
@@ -1065,6 +1371,36 @@ namespace vault.iOS
                 return;
 
             _collectionView.ReloadItems(new[] { NSIndexPath.FromItemSection(index, 0) });
+        }
+
+        private void PrefetchNearbyThumbnails()
+        {
+            if (_session == null || _collectionView == null || _viewMode != BrowserViewMode.Preview)
+                return;
+            if (_visibleItems.Count == 0)
+                return;
+
+            NSIndexPath[] visiblePaths = _collectionView.IndexPathsForVisibleItems ?? Array.Empty<NSIndexPath>();
+            if (visiblePaths.Length == 0)
+                return;
+
+            int minVisible = visiblePaths.Min(path => (int)path.Item);
+            int maxVisible = visiblePaths.Max(path => (int)path.Item);
+            int start = Math.Max(0, minVisible - _thumbnailPrefetchPadding);
+            int end = Math.Min(_visibleItems.Count - 1, maxVisible + _thumbnailPrefetchPadding);
+
+            for (int i = start; i <= end; i++)
+            {
+                VaultFileItem item = _visibleItems[i];
+                if (item.IsFolder || !IsImagePreviewCandidate(item.FileName))
+                    continue;
+                if (_thumbnailCache.ContainsKey(item.Id))
+                    continue;
+                if (_thumbnailLoading.Contains(item.Id))
+                    continue;
+
+                QueueThumbnailGeneration(item);
+            }
         }
 
         private async Task PickVaultToOpenAsync()
@@ -1202,13 +1538,13 @@ namespace vault.iOS
                 return;
             }
 
-            await RunBusyAsync("Apertura vault...", async () =>
+            await RunBusyWithProgressAsync("Apertura vault...", async progress =>
             {
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
 
-                VaultPortableReader reader = await Task.Run(() => OpenVaultReader(vaultUrl, password));
+                VaultPortableReader reader = await Task.Run(() => OpenVaultReader(vaultUrl, password, progress));
 
                 _session?.Dispose();
                 _session = reader;
@@ -1217,10 +1553,8 @@ namespace vault.iOS
                 _currentFolder = string.Empty;
                 _isSelectionMode = false;
                 _selectedItemIds.Clear();
-                _thumbnailLoading.Clear();
-                foreach (UIImage image in _thumbnailCache.Values)
-                    image.Dispose();
-                _thumbnailCache.Clear();
+                ClearThumbnailCache();
+                ClearThumbnailDiskCache();
 
                 ReloadFolderItems();
             });
@@ -1469,14 +1803,14 @@ namespace vault.iOS
             PresentViewController(alert, true, null);
         }
 
-        private async Task PersistVaultAsync()
+        private async Task PersistVaultAsync(IProgress<double>? progress = null)
         {
             if (_session == null || _vaultUrl == null || !_session.IsDirty)
                 return;
 
             VaultPortableReader session = _session;
             NSUrl vaultUrl = _vaultUrl;
-            await Task.Run(() => PersistVaultToUrl(vaultUrl, session));
+            await Task.Run(() => PersistVaultToUrl(vaultUrl, session, progress));
         }
 
         private async Task RunBusyAsync(string message, Func<Task> action)
@@ -1500,7 +1834,32 @@ namespace vault.iOS
             }
         }
 
-        private void SetBusyState(bool busy, string message)
+        private async Task RunBusyWithProgressAsync(string message, Func<IProgress<double>, Task> action)
+        {
+            SetBusyState(true, message, showProgress: true);
+            IProgress<double> progress = new Progress<double>(UpdateBusyProgress);
+            UpdateBusyProgress(0d);
+
+            try
+            {
+                await action(progress);
+                UpdateBusyProgress(100d);
+            }
+            catch (OutOfMemoryException)
+            {
+                ShowError("Memoria iOS insufficiente durante l'operazione richiesta. Chiudi altre app e riprova.");
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex.Message);
+            }
+            finally
+            {
+                SetBusyState(false, string.Empty);
+            }
+        }
+
+        private void SetBusyState(bool busy, string message, bool showProgress = false)
         {
             if (_busyOverlay == null || _busyIndicator == null || _busyLabel == null)
                 return;
@@ -1512,10 +1871,44 @@ namespace vault.iOS
             _busyOverlay.Hidden = !busy;
             view.UserInteractionEnabled = !busy;
 
+            if (_busyProgressView != null)
+            {
+                _busyProgressView.Hidden = !busy || !showProgress;
+                _busyProgressView.Progress = showProgress ? 0f : _busyProgressView.Progress;
+            }
+
+            if (_busyProgressPercentLabel != null)
+            {
+                _busyProgressPercentLabel.Hidden = !busy || !showProgress;
+                if (showProgress)
+                    _busyProgressPercentLabel.Text = "0%";
+            }
+
             if (busy)
                 _busyIndicator.StartAnimating();
             else
                 _busyIndicator.StopAnimating();
+        }
+
+        private void UpdateBusyProgress(double percent)
+        {
+            if (_busyProgressView == null || _busyProgressPercentLabel == null)
+                return;
+
+            void ApplyProgress()
+            {
+                double clamped = Math.Max(0d, Math.Min(100d, percent));
+                _busyProgressView.Progress = (float)(clamped / 100d);
+                _busyProgressPercentLabel.Text = $"{Math.Round(clamped):0}%";
+            }
+
+            if (NSThread.Current.IsMainThread)
+            {
+                ApplyProgress();
+                return;
+            }
+
+            BeginInvokeOnMainThread(ApplyProgress);
         }
 
         private void ShowError(string message)
@@ -1723,7 +2116,7 @@ namespace vault.iOS
             return Path.Combine(runtimeRoot, tempName);
         }
 
-        private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password)
+        private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password, IProgress<double>? progress = null)
         {
             using var scope = new SecurityScopeAccess(fileUrl);
 
@@ -1732,10 +2125,10 @@ namespace vault.iOS
                 throw new IOException("Percorso file non valido.");
 
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            return VaultPortableReader.Open(stream, password, allowUltra: true);
+            return VaultPortableReader.Open(stream, password, allowUltra: true, progress: progress);
         }
 
-        private static void PersistVaultToUrl(NSUrl fileUrl, VaultPortableReader session)
+        private static void PersistVaultToUrl(NSUrl fileUrl, VaultPortableReader session, IProgress<double>? progress = null)
         {
             using var scope = new SecurityScopeAccess(fileUrl);
 
@@ -1751,7 +2144,7 @@ namespace vault.iOS
             {
                 using (var output = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
-                    session.SaveToStream(output);
+                    session.SaveToStream(output, progress);
                     output.Flush(flushToDisk: true);
                 }
 
@@ -1982,7 +2375,7 @@ namespace vault.iOS
                         if (_thumbnailCache.TryGetValue(item.Id, out UIImage? old))
                             old.Dispose();
 
-                        if (!_thumbnailCache.ContainsKey(item.Id) && _thumbnailCache.Count >= ThumbnailCacheLimit)
+                        if (!_thumbnailCache.ContainsKey(item.Id) && _thumbnailCache.Count >= _thumbnailMemoryCacheLimit)
                         {
                             Guid removeId = _thumbnailCache.Keys.First();
                             _thumbnailCache[removeId].Dispose();
@@ -2001,6 +2394,10 @@ namespace vault.iOS
             if (session == null)
                 return null;
 
+            UIImage? cachedThumbnail = TryLoadThumbnailFromDisk(item.Id);
+            if (cachedThumbnail != null)
+                return cachedThumbnail;
+
             bool deleteTempAfterUse = false;
             string sourcePath = string.Empty;
             try
@@ -2015,7 +2412,11 @@ namespace vault.iOS
                     }
                 }
 
-                return CreateDownsampledThumbnail(sourcePath, ThumbnailMaxPixelSize);
+                UIImage? generated = CreateDownsampledThumbnail(sourcePath, _thumbnailTargetPixelSize);
+                if (generated != null)
+                    SaveThumbnailToDisk(item.Id, generated);
+
+                return generated;
             }
             catch
             {
@@ -2025,6 +2426,119 @@ namespace vault.iOS
             {
                 if (deleteTempAfterUse)
                     TryDeletePath(sourcePath);
+            }
+        }
+
+        private UIImage? TryLoadThumbnailFromDisk(Guid itemId)
+        {
+            if (!_thumbnailDiskCacheEnabled)
+                return null;
+
+            string cachePath = GetThumbnailCachePath(itemId);
+            if (!File.Exists(cachePath))
+                return null;
+
+            try
+            {
+                UIImage? image = UIImage.FromFile(cachePath);
+                if (image == null)
+                    return null;
+
+                lock (_thumbnailDiskCacheLock)
+                {
+                    if (File.Exists(cachePath))
+                        File.SetLastWriteTimeUtc(cachePath, DateTime.UtcNow);
+                }
+
+                UIImage rendered = image.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+                if (!ReferenceEquals(rendered, image))
+                    image.Dispose();
+
+                return rendered;
+            }
+            catch
+            {
+                TryDeletePath(cachePath);
+                return null;
+            }
+        }
+
+        private void SaveThumbnailToDisk(Guid itemId, UIImage image)
+        {
+            if (!_thumbnailDiskCacheEnabled)
+                return;
+
+            string cacheDirectory = GetThumbnailCacheDirectoryPath();
+            string cachePath = GetThumbnailCachePath(itemId);
+
+            lock (_thumbnailDiskCacheLock)
+            {
+                try
+                {
+                    Directory.CreateDirectory(cacheDirectory);
+                    using NSData? jpegData = image.AsJPEG((nfloat)0.78f);
+                    if (jpegData == null)
+                        return;
+
+                    File.WriteAllBytes(cachePath, jpegData.ToArray());
+                    File.SetLastWriteTimeUtc(cachePath, DateTime.UtcNow);
+                    PruneThumbnailDiskCacheIfNeeded();
+                }
+                catch
+                {
+                    // Best effort cache write.
+                }
+            }
+        }
+
+        private void PruneThumbnailDiskCacheIfNeeded()
+        {
+            if (_thumbnailDiskCacheFileLimit <= 0)
+                return;
+
+            string cacheDirectory = GetThumbnailCacheDirectoryPath();
+            if (!Directory.Exists(cacheDirectory))
+                return;
+
+            FileInfo[] files;
+            try
+            {
+                files = new DirectoryInfo(cacheDirectory).GetFiles("*.jpg");
+            }
+            catch
+            {
+                return;
+            }
+
+            if (files.Length <= _thumbnailDiskCacheFileLimit)
+                return;
+
+            int toRemove = files.Length - _thumbnailDiskCacheFileLimit;
+            foreach (FileInfo file in files.OrderBy(f => f.LastWriteTimeUtc).Take(toRemove))
+                TryDeletePath(file.FullName);
+        }
+
+        private static string GetThumbnailCachePath(Guid itemId)
+        {
+            return Path.Combine(GetThumbnailCacheDirectoryPath(), $"{itemId:N}.jpg");
+        }
+
+        private void ClearThumbnailDiskCache()
+        {
+            string cacheDirectory = GetThumbnailCacheDirectoryPath();
+            if (!Directory.Exists(cacheDirectory))
+                return;
+
+            lock (_thumbnailDiskCacheLock)
+            {
+                try
+                {
+                    Directory.Delete(cacheDirectory, recursive: true);
+                }
+                catch
+                {
+                    // Best effort cleanup.
+                }
             }
         }
 
@@ -2043,16 +2557,24 @@ namespace vault.iOS
 
             using CGImage? cgImage = imageSource.CreateThumbnail(0, new CGImageThumbnailOptions
             {
-                CreateThumbnailFromImageAlways = true,
+                CreateThumbnailFromImageIfAbsent = true,
                 CreateThumbnailWithTransform = true,
                 MaxPixelSize = maxPixelSize,
-                ShouldCache = false,
-                ShouldCacheImmediately = false
+                ShouldCache = true,
+                ShouldCacheImmediately = true
             });
             if (cgImage == null)
                 return null;
 
-            return UIImage.FromImage(cgImage).ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+            UIImage? baseImage = UIImage.FromImage(cgImage);
+            if (baseImage == null)
+                return null;
+
+            UIImage rendered = baseImage.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+            if (!ReferenceEquals(rendered, baseImage))
+                baseImage.Dispose();
+
+            return rendered;
         }
 
         private static bool IsImagePreviewCandidate(string? fileName)
@@ -2135,6 +2657,11 @@ namespace vault.iOS
             {
                 collectionView.DeselectItem(indexPath, false);
                 _owner.HandleCollectionItemTapped(indexPath.Row);
+            }
+
+            public override void Scrolled(UIScrollView scrollView)
+            {
+                _owner.PrefetchNearbyThumbnails();
             }
         }
 
