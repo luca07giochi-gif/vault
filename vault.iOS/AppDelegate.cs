@@ -39,8 +39,14 @@ namespace vault.iOS
         {
             if (Window?.RootViewController is UINavigationController nav)
             {
-                return nav.ViewControllers.OfType<MainViewController>().FirstOrDefault()
-                    ?? nav.TopViewController as MainViewController;
+                UIViewController[]? controllers = nav.ViewControllers;
+                if (controllers != null)
+                {
+                    return controllers.OfType<MainViewController>().FirstOrDefault()
+                        ?? nav.TopViewController as MainViewController;
+                }
+
+                return nav.TopViewController as MainViewController;
             }
 
             return Window?.RootViewController as MainViewController;

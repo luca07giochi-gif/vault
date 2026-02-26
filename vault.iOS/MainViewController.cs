@@ -474,7 +474,6 @@ namespace vault.iOS
             _pathNavigateUpButton = new UIButton(UIButtonType.System);
             _pathNavigateUpButton.SetImage(UIImage.GetSystemImage("chevron.up"), UIControlState.Normal);
             _pathNavigateUpButton.TintColor = UIColor.FromRGB(10, 132, 255);
-            _pathNavigateUpButton.ContentEdgeInsets = new UIEdgeInsets(3f, 3f, 3f, 3f);
             _pathNavigateUpButton.TouchUpInside += (_, _) => NavigateUp();
 
             _pathTitleButton = new UIButton(UIButtonType.System);
@@ -598,7 +597,7 @@ namespace vault.iOS
                 UIBarButtonItemStyle.Plain,
                 (_, _) => HandleTopRemoveRequest())
             {
-                TintColor = UIColor.SystemRedColor
+                TintColor = UIColor.FromRGB(255, 59, 48)
             };
 
             NavigationItem.RightBarButtonItems = new[] { removeButton };
