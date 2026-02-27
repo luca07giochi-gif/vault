@@ -801,23 +801,28 @@ namespace vault.Core.Domain
             string sessionDirectory,
             IProgress<double>? progress)
         {
-            byte[] encryptedPayload = ReadToEnd(vaultStream);
+            byte[] encryptedPayload = ReadToEnd(vaultStream, CreateScaledProgress(progress, 20, 48));
             if (encryptedPayload.Length <= 0)
                 throw new InvalidDataException(VaultText.T("core.format.payloadMissing"));
 
-            ReportProgress(progress, 38);
+            ReportProgress(progress, 48);
 
             byte[] aad = VaultFileFormat.SerializeHeaderForAad(header);
-            byte[] decrypted = AesGcmProvider.Decrypt(sessionKey, header.Nonce, encryptedPayload, aad);
+            byte[] decrypted = AesGcmProvider.Decrypt(
+                sessionKey,
+                header.Nonce,
+                encryptedPayload,
+                aad,
+                CreateScaledProgress(progress, 48, 74));
             Array.Clear(encryptedPayload, 0, encryptedPayload.Length);
-            ReportProgress(progress, 62);
+            ReportProgress(progress, 74);
 
             try
             {
                 if (decrypted.Length < 4 || BitConverter.ToInt32(decrypted, 0) != PlaintextMagic)
                     throw new CryptographicException(VaultText.T("core.error.passwordWrong"));
 
-                var deserializeProgress = CreateScaledProgress(progress, 62, 94);
+                var deserializeProgress = CreateScaledProgress(progress, 74, 98);
                 VaultContent content = VaultSerializer.Deserialize(decrypted, deserializeProgress);
                 Dictionary<Guid, FileContentHandle> handles = BuildHandlesFromInMemoryContent(content, sessionDirectory);
                 ReportProgress(progress, 100);
@@ -1351,10 +1356,50 @@ namespace vault.Core.Domain
             return buffer;
         }
 
-        private static byte[] ReadToEnd(Stream input)
+        private static byte[] ReadToEnd(Stream input, IProgress<double>? progress = null)
         {
             using var ms = new MemoryStream();
-            input.CopyTo(ms);
+            var buffer = new byte[CopyBufferSize];
+
+            if (input.CanSeek)
+            {
+                long startPosition = input.Position;
+                long totalLength = Math.Max(0L, input.Length - startPosition);
+                long totalRead = 0;
+
+                while (true)
+                {
+                    int read = input.Read(buffer, 0, buffer.Length);
+                    if (read <= 0)
+                        break;
+
+                    ms.Write(buffer, 0, read);
+                    totalRead += read;
+
+                    if (totalLength > 0)
+                        ReportProgress(progress, totalRead * 100.0 / totalLength);
+                }
+            }
+            else
+            {
+                long totalRead = 0;
+                while (true)
+                {
+                    int read = input.Read(buffer, 0, buffer.Length);
+                    if (read <= 0)
+                        break;
+
+                    ms.Write(buffer, 0, read);
+                    totalRead += read;
+
+                    // Fallback when total length is unknown.
+                    double readMb = totalRead / (1024d * 1024d);
+                    double pseudoProgress = Math.Min(95d, 100d - (100d / (1d + readMb)));
+                    ReportProgress(progress, pseudoProgress);
+                }
+            }
+
+            ReportProgress(progress, 100);
             return ms.ToArray();
         }
 

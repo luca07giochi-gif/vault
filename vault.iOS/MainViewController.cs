@@ -1294,12 +1294,68 @@ namespace vault.iOS
                 if (_session == null)
                     return;
 
-                _session.MoveItems(selectedIds, normalizedDestination);
-                await PersistVaultAsync();
-                EnsureCurrentFolderStillExists();
-                ExitSelectionMode(clearSelection: true);
-                ReloadFolderItems();
+                var createdFolderIds = new List<Guid>();
+                try
+                {
+                    EnsureDestinationFolderExistsForMove(normalizedDestination, createdFolderIds);
+                    _session.MoveItems(selectedIds, normalizedDestination);
+                    await PersistVaultAsync();
+                    EnsureCurrentFolderStillExists();
+                    ExitSelectionMode(clearSelection: true);
+                    ReloadFolderItems();
+                }
+                catch
+                {
+                    if (_session != null && createdFolderIds.Count > 0)
+                    {
+                        try
+                        {
+                            _session.DeleteItems(createdFolderIds);
+                        }
+                        catch
+                        {
+                            // Best effort rollback.
+                        }
+                    }
+
+                    throw;
+                }
             });
+        }
+
+        private void EnsureDestinationFolderExistsForMove(string destinationPath, ICollection<Guid>? createdFolderIds = null)
+        {
+            if (_session == null)
+                return;
+
+            string normalized = NormalizeFolderPath(destinationPath);
+            if (string.IsNullOrWhiteSpace(normalized))
+                return;
+
+            HashSet<string> existing = _session.GetAllFolderPaths()
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (existing.Contains(normalized))
+                return;
+
+            string parent = string.Empty;
+            foreach (string segment in normalized.Split('/', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string current = string.IsNullOrWhiteSpace(parent)
+                    ? segment
+                    : $"{parent}/{segment}";
+
+                if (existing.Contains(current))
+                {
+                    parent = current;
+                    continue;
+                }
+
+                VaultFileItem created = _session.CreateFolder(segment, parent);
+                string createdPath = NormalizeFolderPath(created.FullPath);
+                existing.Add(createdPath);
+                parent = createdPath;
+                createdFolderIds?.Add(created.Id);
+            }
         }
 
         private void PromptDeleteSelectedItems()
@@ -2897,9 +2953,7 @@ namespace vault.iOS
             private readonly Guid[] _itemIds;
             private readonly Action<string, Guid[]> _onMoveConfirmed;
             private readonly List<string> _folderPaths = new();
-            private readonly List<Guid> _createdFolderIds = new();
             private string _selectedDestination;
-            private bool _confirmedMove;
             private UITableView? _tableView;
 
             public MoveDestinationViewController(
@@ -2935,14 +2989,6 @@ namespace vault.iOS
                 View.AddSubview(_tableView);
 
                 ReloadFolders();
-            }
-
-            public override void ViewDidDisappear(bool animated)
-            {
-                base.ViewDidDisappear(animated);
-
-                if (IsMovingFromParentViewController && !_confirmedMove)
-                    RollbackCreatedFolders();
             }
 
             private void ReloadFolders()
@@ -2989,12 +3035,10 @@ namespace vault.iOS
                     return;
                 }
 
-                _confirmedMove = true;
-                _createdFolderIds.Clear();
                 string destination = _selectedDestination;
                 Guid[] ids = _itemIds.ToArray();
+                _onMoveConfirmed(destination, ids);
                 NavigationController?.PopViewController(true);
-                BeginInvokeOnMainThread(() => _onMoveConfirmed(destination, ids));
             }
 
             private void PromptCreateFolder(string parentPath)
@@ -3018,38 +3062,22 @@ namespace vault.iOS
                     }
 
                     string normalizedParent = NormalizeFolderPath(parentPath);
+                    string fullPath = string.IsNullOrWhiteSpace(normalizedParent)
+                        ? name
+                        : $"{normalizedParent}/{name}";
+                    if (_folderPaths.Any(path => string.Equals(path, fullPath, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        ShowError("Esiste gia una cartella con questo nome nella posizione scelta.");
+                        return;
+                    }
 
-                    try
-                    {
-                        VaultFileItem folder = _session.CreateFolder(name, normalizedParent);
-                        _createdFolderIds.Add(folder.Id);
-                        _selectedDestination = NormalizeFolderPath(folder.FullPath);
-                        ReloadFolders();
-                    }
-                    catch (Exception ex)
-                    {
-                        ShowError(ex.Message);
-                    }
+                    _folderPaths.Add(fullPath);
+                    _folderPaths.Sort(StringComparer.OrdinalIgnoreCase);
+                    _selectedDestination = fullPath;
+                    _tableView?.ReloadData();
                 }));
 
                 PresentViewController(alert, true, null);
-            }
-
-            private void RollbackCreatedFolders()
-            {
-                if (_createdFolderIds.Count == 0)
-                    return;
-
-                try
-                {
-                    _session.DeleteItems(_createdFolderIds.ToArray());
-                }
-                catch
-                {
-                    // Best effort rollback.
-                }
-
-                _createdFolderIds.Clear();
             }
 
             private static string NormalizeFolderName(string name)

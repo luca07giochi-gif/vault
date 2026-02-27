@@ -52,7 +52,8 @@ namespace vault.Core.Crypto
             byte[] key,
             byte[] nonce,
             byte[] cipherAndTag,
-            byte[] aad)
+            byte[] aad,
+            IProgress<double>? progress = null)
         {
             if (key == null) throw new ArgumentNullException(nameof(key));
             if (nonce == null) throw new ArgumentNullException(nameof(nonce));
@@ -63,6 +64,9 @@ namespace vault.Core.Crypto
                 throw new CryptographicException(VaultText.T("core.crypto.invalidCiphertext"));
 
             int cipherLen = cipherAndTag.Length - TagSize;
+
+            if (progress != null)
+                return DecryptWithBouncyCastle(key, nonce, cipherAndTag, aad, progress);
 
             byte[] plaintext = new byte[cipherLen];
             ReadOnlySpan<byte> ciphertext = cipherAndTag.AsSpan(0, cipherLen);
@@ -103,7 +107,12 @@ namespace vault.Core.Crypto
             return resized;
         }
 
-        private static byte[] DecryptWithBouncyCastle(byte[] key, byte[] nonce, byte[] cipherAndTag, byte[] aad)
+        private static byte[] DecryptWithBouncyCastle(
+            byte[] key,
+            byte[] nonce,
+            byte[] cipherAndTag,
+            byte[] aad,
+            IProgress<double>? progress = null)
         {
             var cipher = new GcmBlockCipher(new AesEngine());
             var parameters = new AeadParameters(new KeyParameter(key), TagSize * 8, nonce, aad);
@@ -112,8 +121,27 @@ namespace vault.Core.Crypto
             try
             {
                 byte[] output = new byte[cipher.GetOutputSize(cipherAndTag.Length)];
-                int written = cipher.ProcessBytes(cipherAndTag, 0, cipherAndTag.Length, output, 0);
+                int written = 0;
+
+                if (progress == null)
+                {
+                    written += cipher.ProcessBytes(cipherAndTag, 0, cipherAndTag.Length, output, 0);
+                }
+                else
+                {
+                    const int chunkSize = 256 * 1024;
+                    int offset = 0;
+                    while (offset < cipherAndTag.Length)
+                    {
+                        int toProcess = Math.Min(chunkSize, cipherAndTag.Length - offset);
+                        written += cipher.ProcessBytes(cipherAndTag, offset, toProcess, output, written);
+                        offset += toProcess;
+                        progress.Report(Math.Min(99.5, offset * 100.0 / cipherAndTag.Length));
+                    }
+                }
+
                 written += cipher.DoFinal(output, written);
+                progress?.Report(100);
 
                 if (written == output.Length)
                     return output;

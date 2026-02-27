@@ -16,6 +16,7 @@ namespace vault.Core.Domain
         private const long MaxStandardImportableFileBytes = int.MaxValue - 4096L;
         private const long MaxLegacyVaultPlaintextBytes = int.MaxValue - 16L;
         private const int UltraFileChunkSizeBytes = 8 * 1024 * 1024;
+        private const int LegacyReadBufferSize = 256 * 1024;
         private static readonly TimeSpan FailedOpenWindow = TimeSpan.FromMinutes(5);
 
         private VaultContent? _content;
@@ -67,17 +68,23 @@ namespace vault.Core.Domain
 
                 if (header.Version == VaultFileFormat.LEGACY_VERSION)
                 {
-                    byte[] encryptedPayload = VaultFileFormat.ReadEncryptedPayload(path);
-                    ReportProgress(progress, 38);
+                    byte[] encryptedPayload = ReadLegacyEncryptedPayloadWithProgress(path, CreateScaledProgress(progress, 18, 48));
+                    ReportProgress(progress, 48);
 
                     byte[] aad = VaultFileFormat.SerializeHeaderForAad(header);
-                    byte[] decrypted = AesGcmProvider.Decrypt(_sessionKey, header.Nonce, encryptedPayload, aad);
-                    ReportProgress(progress, 62);
+                    byte[] decrypted = AesGcmProvider.Decrypt(
+                        _sessionKey,
+                        header.Nonce,
+                        encryptedPayload,
+                        aad,
+                        CreateScaledProgress(progress, 48, 74));
+                    Array.Clear(encryptedPayload, 0, encryptedPayload.Length);
+                    ReportProgress(progress, 74);
 
                     if (decrypted.Length < 4 || BitConverter.ToInt32(decrypted, 0) != 0x5641554C)
                         throw new CryptographicException(VaultText.T("core.error.passwordWrong"));
 
-                    var deserializeProgress = CreateScaledProgress(progress, 62, 98);
+                    var deserializeProgress = CreateScaledProgress(progress, 74, 98);
                     _content = VaultSerializer.Deserialize(decrypted, deserializeProgress);
                     Array.Clear(decrypted, 0, decrypted.Length);
                 }
@@ -1176,6 +1183,38 @@ namespace vault.Core.Domain
                 return long.MaxValue;
 
             return left + right;
+        }
+
+        private static byte[] ReadLegacyEncryptedPayloadWithProgress(string path, IProgress<double>? progress)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (fs.Length <= VaultFileFormat.HEADER_SIZE)
+                throw new InvalidDataException(VaultText.T("core.format.payloadMissing"));
+
+            long payloadLengthLong = fs.Length - VaultFileFormat.HEADER_SIZE;
+            if (payloadLengthLong > int.MaxValue)
+                throw new InvalidOperationException(VaultText.T("core.format.vaultTooLargeLegacy"));
+
+            int payloadLength = (int)payloadLengthLong;
+            var payload = new byte[payloadLength];
+            fs.Position = VaultFileFormat.HEADER_SIZE;
+
+            int offset = 0;
+            var buffer = new byte[LegacyReadBufferSize];
+            while (offset < payload.Length)
+            {
+                int toRead = Math.Min(buffer.Length, payload.Length - offset);
+                int read = fs.Read(buffer, 0, toRead);
+                if (read <= 0)
+                    throw new InvalidDataException(VaultText.T("core.format.payloadMissing"));
+
+                Buffer.BlockCopy(buffer, 0, payload, offset, read);
+                offset += read;
+                ReportProgress(progress, payload.Length == 0 ? 100 : offset * 100.0 / payload.Length);
+            }
+
+            ReportProgress(progress, 100);
+            return payload;
         }
 
         private static void ReportProgress(IProgress<double>? progress, double value)
