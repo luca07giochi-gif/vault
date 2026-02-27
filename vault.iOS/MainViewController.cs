@@ -5,6 +5,8 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using AVFoundation;
+using AVKit;
 using CoreGraphics;
 using Foundation;
 using ImageIO;
@@ -97,6 +99,7 @@ namespace vault.iOS
 
         private UIDocumentInteractionController? _documentInteractionController;
         private DocumentInteractionDelegate? _documentInteractionDelegate;
+        private InAppVideoPlayerViewController? _videoPlayerController;
         private PickerDelegate? _pickerDelegate;
         private GalleryMultiPickerDelegate? _galleryMultiPickerDelegate;
         private string? _activePreviewTemporaryPath;
@@ -2118,6 +2121,17 @@ namespace vault.iOS
             }));
             sheet.AddAction(UIAlertAction.Create("Rinomina", UIAlertActionStyle.Default, __ => PromptRename(item)));
             sheet.AddAction(UIAlertAction.Create("Sposta", UIAlertActionStyle.Default, __ => PromptMove(item)));
+            if (IsImagePreviewCandidate(item.FileName))
+            {
+                sheet.AddAction(UIAlertAction.Create("Ruota 90 gradi destra", UIAlertActionStyle.Default, __ =>
+                {
+                    _ = RotateImagePermanentAsync(item, clockwise: true);
+                }));
+                sheet.AddAction(UIAlertAction.Create("Ruota 90 gradi sinistra", UIAlertActionStyle.Default, __ =>
+                {
+                    _ = RotateImagePermanentAsync(item, clockwise: false);
+                }));
+            }
             sheet.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, __ => PromptDelete(item)));
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
 
@@ -2127,10 +2141,85 @@ namespace vault.iOS
             await Task.CompletedTask;
         }
 
+        private async Task RotateImagePermanentAsync(VaultFileItem item, bool clockwise)
+        {
+            if (_session == null || item.IsFolder || !IsImagePreviewCandidate(item.FileName))
+                return;
+
+            VaultPortableReader session = _session;
+            Guid originalId = item.Id;
+            string originalParent = item.ParentPath;
+            string originalName = item.FileName;
+            string rotatedName = GetRotatedOutputName(originalName);
+
+            string originalBackupPath = CreateTemporaryPath(originalName);
+            string rotatedPath = CreateTemporaryPath(rotatedName);
+            Guid rotatedId = Guid.Empty;
+
+            try
+            {
+                await RunBusyWithProgressAsync(
+                    clockwise ? "Rotazione a destra..." : "Rotazione a sinistra...",
+                    async progress =>
+                    {
+                        if (_session == null)
+                            return;
+
+                        ReportProgress(progress, 4d);
+                        await Task.Run(() =>
+                        {
+                            using var output = new FileStream(
+                                originalBackupPath,
+                                FileMode.Create,
+                                FileAccess.Write,
+                                FileShare.None,
+                                VaultPersistCopyBufferSize,
+                                FileOptions.SequentialScan);
+                            session.CopyFileContentToStream(originalId, output);
+                        });
+
+                        ReportProgress(progress, 24d);
+                        await Task.Run(() =>
+                        {
+                            RotateImageFileOnDisk(originalBackupPath, rotatedPath, rotatedName, clockwise);
+                        });
+
+                        try
+                        {
+                            ReportProgress(progress, 46d);
+                            VaultFileItem added = await Task.Run(() => session.AddFileFromPath(rotatedPath, originalParent));
+                            rotatedId = added.Id;
+
+                            session.DeleteItems(new[] { originalId });
+                            session.RenameItem(rotatedId, rotatedName);
+                            await PersistVaultAsync(CreateScaledProgress(progress, 52d, 100d));
+                            EnsureCurrentFolderStillExists();
+                            ReloadFolderItems();
+                        }
+                        catch
+                        {
+                            TryRollbackRotateOperation(session, rotatedId, originalId, originalBackupPath, originalParent, originalName);
+                            throw;
+                        }
+                    });
+            }
+            finally
+            {
+                TryDeletePath(originalBackupPath);
+                TryDeletePath(rotatedPath);
+            }
+        }
+
         private async Task OpenFileAsync(VaultFileItem item)
         {
             if (_session == null)
                 return;
+
+            if (IsVideoPreviewCandidate(item.FileName))
+            {
+                await OpenVideoInAppAsync(item);
+                return;
+            }
 
             if (TryPresentImageGallery(item))
             {
@@ -2142,6 +2231,18 @@ namespace vault.iOS
             {
                 string tempPath = await Task.Run(() => WriteTemporaryFileFromVault(_session, item));
                 PresentDocumentPreview(tempPath);
+            });
+        }
+
+        private async Task OpenVideoInAppAsync(VaultFileItem item)
+        {
+            if (_session == null)
+                return;
+
+            await RunBusyAsync("Preparazione video...", async () =>
+            {
+                string tempPath = await Task.Run(() => WriteTemporaryFileFromVault(_session, item));
+                PresentInAppVideoPlayer(tempPath, item.FileName);
             });
         }
 
@@ -2167,6 +2268,28 @@ namespace vault.iOS
             };
             PresentViewController(nav, true, null);
             return true;
+        }
+
+        private void PresentInAppVideoPlayer(string localPath, string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(localPath) || !File.Exists(localPath))
+                throw new FileNotFoundException("Video temporaneo non trovato.", localPath);
+
+            _videoPlayerController = new InAppVideoPlayerViewController(
+                localPath,
+                fileName,
+                onClosed: () =>
+                {
+                    _videoPlayerController = null;
+                    DeleteTemporaryFile(localPath);
+                });
+
+            var nav = new UINavigationController(_videoPlayerController)
+            {
+                ModalPresentationStyle = UIModalPresentationStyle.FullScreen
+            };
+
+            PresentViewController(nav, true, null);
         }
 
         private async Task ExportFileAsync(VaultFileItem item)
@@ -3485,6 +3608,155 @@ namespace vault.iOS
             return ext is ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".webp" or ".heic" or ".tif" or ".tiff";
         }
 
+        private static bool IsVideoPreviewCandidate(string? fileName)
+        {
+            string ext = (Path.GetExtension(fileName ?? string.Empty) ?? string.Empty).ToLowerInvariant();
+            return ext is ".mov" or ".mp4" or ".m4v";
+        }
+
+        private static string GetRotatedOutputName(string originalName)
+        {
+            string ext = (Path.GetExtension(originalName ?? string.Empty) ?? string.Empty).ToLowerInvariant();
+            if (ext is ".jpg" or ".jpeg" or ".png")
+                return originalName;
+
+            string baseName = Path.GetFileNameWithoutExtension(originalName ?? "immagine");
+            if (string.IsNullOrWhiteSpace(baseName))
+                baseName = "immagine";
+
+            return $"{baseName}.jpg";
+        }
+
+        private static void RotateImageFileOnDisk(string sourcePath, string destinationPath, string outputName, bool clockwise)
+        {
+            if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+                throw new FileNotFoundException("Immagine sorgente non trovata.", sourcePath);
+
+            using UIImage? source = UIImage.FromFile(sourcePath);
+            if (source == null)
+                throw new InvalidOperationException("Formato immagine non supportato per la rotazione.");
+
+            using UIImage rotated = RotateImageBy90(source, clockwise);
+            using NSData? data = EncodeImageForName(rotated, outputName);
+            if (data == null)
+                throw new InvalidOperationException("Impossibile salvare l'immagine ruotata.");
+
+            File.WriteAllBytes(destinationPath, data.ToArray());
+        }
+
+        private static UIImage RotateImageBy90(UIImage source, bool clockwise)
+        {
+            UIImage normalized = NormalizeImageOrientation(source);
+            bool disposeNormalized = !ReferenceEquals(normalized, source);
+
+            nfloat srcWidth = normalized.Size.Width;
+            nfloat srcHeight = normalized.Size.Height;
+            CGSize dstSize = new CGSize(srcHeight, srcWidth);
+            nfloat scale = normalized.CurrentScale > 0f ? normalized.CurrentScale : UIScreen.MainScreen.Scale;
+            if (scale <= 0f)
+                scale = 1f;
+
+            UIGraphics.BeginImageContextWithOptions(dstSize, false, scale);
+            try
+            {
+                CGContext? ctx = UIGraphics.GetCurrentContext();
+                if (ctx == null)
+                    throw new InvalidOperationException("Contesto grafico non disponibile.");
+
+                if (clockwise)
+                {
+                    ctx.TranslateCTM(dstSize.Width, 0f);
+                    ctx.RotateCTM((nfloat)(Math.PI / 2d));
+                }
+                else
+                {
+                    ctx.TranslateCTM(0f, dstSize.Height);
+                    ctx.RotateCTM((nfloat)(-Math.PI / 2d));
+                }
+
+                normalized.Draw(new CGRect(0f, 0f, srcWidth, srcHeight));
+                UIImage? rendered = UIGraphics.GetImageFromCurrentImageContext();
+                if (rendered == null)
+                    throw new InvalidOperationException("Impossibile ottenere l'immagine ruotata.");
+
+                UIImage result = rendered.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+                if (!ReferenceEquals(result, rendered))
+                    rendered.Dispose();
+
+                return result;
+            }
+            finally
+            {
+                UIGraphics.EndImageContext();
+                if (disposeNormalized)
+                    normalized.Dispose();
+            }
+        }
+
+        private static UIImage NormalizeImageOrientation(UIImage image)
+        {
+            if (image.Orientation == UIImageOrientation.Up)
+                return image;
+
+            nfloat scale = image.CurrentScale > 0f ? image.CurrentScale : UIScreen.MainScreen.Scale;
+            if (scale <= 0f)
+                scale = 1f;
+
+            UIGraphics.BeginImageContextWithOptions(image.Size, false, scale);
+            try
+            {
+                image.Draw(new CGRect(0f, 0f, image.Size.Width, image.Size.Height));
+                UIImage? normalized = UIGraphics.GetImageFromCurrentImageContext();
+                return normalized ?? image;
+            }
+            finally
+            {
+                UIGraphics.EndImageContext();
+            }
+        }
+
+        private static NSData? EncodeImageForName(UIImage image, string fileName)
+        {
+            string ext = (Path.GetExtension(fileName ?? string.Empty) ?? string.Empty).ToLowerInvariant();
+            if (ext == ".png")
+                return image.AsPNG();
+
+            return image.AsJPEG((nfloat)0.92f);
+        }
+
+        private static void TryRollbackRotateOperation(
+            VaultPortableReader session,
+            Guid rotatedId,
+            Guid originalId,
+            string originalBackupPath,
+            string originalParent,
+            string originalName)
+        {
+            try
+            {
+                if (rotatedId != Guid.Empty)
+                    session.DeleteItems(new[] { rotatedId });
+            }
+            catch
+            {
+                // Best effort rollback.
+            }
+
+            bool originalStillPresent = session.Files.Any(file => file.Id == originalId);
+            if (originalStillPresent || !File.Exists(originalBackupPath))
+                return;
+
+            try
+            {
+                VaultFileItem restored = session.AddFileFromPath(originalBackupPath, originalParent);
+                session.RenameItem(restored.Id, originalName);
+            }
+            catch
+            {
+                // Best effort rollback.
+            }
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
@@ -4543,6 +4815,121 @@ namespace vault.iOS
 
                 foreach (string path in tempPaths)
                     MainViewController.TryDeletePath(path);
+            }
+        }
+
+        private sealed class InAppVideoPlayerViewController : UIViewController
+        {
+            private readonly string _localPath;
+            private readonly string _displayName;
+            private readonly Action _onClosed;
+
+            private AVPlayer? _player;
+            private AVPlayerViewController? _playerController;
+            private bool _closed;
+
+            public InAppVideoPlayerViewController(string localPath, string displayName, Action onClosed)
+            {
+                _localPath = localPath ?? throw new ArgumentNullException(nameof(localPath));
+                _displayName = string.IsNullOrWhiteSpace(displayName) ? "Video" : displayName;
+                _onClosed = onClosed ?? throw new ArgumentNullException(nameof(onClosed));
+            }
+
+            public override void ViewDidLoad()
+            {
+                base.ViewDidLoad();
+
+                View!.BackgroundColor = UIColor.Black;
+                Title = _displayName;
+                NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
+                NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
+                    "Chiudi",
+                    UIBarButtonItemStyle.Done,
+                    (_, _) => DismissViewController(true, null));
+
+                NSUrl sourceUrl = NSUrl.FromFilename(_localPath);
+                _player = AVPlayer.FromUrl(sourceUrl);
+                _playerController = new AVPlayerViewController
+                {
+                    Player = _player,
+                    ShowsPlaybackControls = true
+                };
+
+                AddChildViewController(_playerController);
+                View.AddSubview(_playerController.View);
+                _playerController.DidMoveToParentViewController(this);
+            }
+
+            public override void ViewDidAppear(bool animated)
+            {
+                base.ViewDidAppear(animated);
+                _player?.Play();
+            }
+
+            public override void ViewWillDisappear(bool animated)
+            {
+                base.ViewWillDisappear(animated);
+                _player?.Pause();
+            }
+
+            public override void ViewDidLayoutSubviews()
+            {
+                base.ViewDidLayoutSubviews();
+                if (_playerController?.View == null || View == null)
+                    return;
+
+                _playerController.View.Frame = View.Bounds;
+            }
+
+            public override void ViewDidDisappear(bool animated)
+            {
+                base.ViewDidDisappear(animated);
+                if (IsBeingDismissed || NavigationController?.IsBeingDismissed == true)
+                    CloseAndCleanup();
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                    CloseAndCleanup();
+
+                base.Dispose(disposing);
+            }
+
+            private void CloseAndCleanup()
+            {
+                if (_closed)
+                    return;
+                _closed = true;
+
+                try
+                {
+                    _player?.Pause();
+                }
+                catch
+                {
+                    // Best effort.
+                }
+
+                if (_playerController != null)
+                {
+                    try
+                    {
+                        _playerController.WillMoveToParentViewController(null);
+                        _playerController.View?.RemoveFromSuperview();
+                        _playerController.RemoveFromParentViewController();
+                    }
+                    catch
+                    {
+                        // Best effort.
+                    }
+                }
+
+                _playerController?.Dispose();
+                _player?.Dispose();
+                _playerController = null;
+                _player = null;
+                _onClosed();
             }
         }
 
