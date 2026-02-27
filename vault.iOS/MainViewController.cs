@@ -71,6 +71,7 @@ namespace vault.iOS
         private UICollectionView? _collectionView;
         private UILabel? _emptyLabel;
         private UIButton? _openVaultCenteredButton;
+        private UIButton? _createVaultCenteredButton;
         private UITabBar? _bottomTabBar;
         private UITabBarItem? _vaultTabItem;
         private UITabBarItem? _addTabItem;
@@ -241,6 +242,15 @@ namespace vault.iOS
             _openVaultCenteredButton.TouchUpInside += (_, _) => _ = PickVaultToOpenAsync();
             View.AddSubview(_openVaultCenteredButton);
 
+            _createVaultCenteredButton = new UIButton(UIButtonType.System);
+            _createVaultCenteredButton.SetTitle("Crea vault", UIControlState.Normal);
+            _createVaultCenteredButton.SetTitleColor(UIColor.White, UIControlState.Normal);
+            _createVaultCenteredButton.BackgroundColor = UIColor.FromRGB(52, 199, 89);
+            _createVaultCenteredButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
+            _createVaultCenteredButton.Layer.CornerRadius = 13f;
+            _createVaultCenteredButton.TouchUpInside += (_, _) => PromptCreateVaultSettingsMenu();
+            View.AddSubview(_createVaultCenteredButton);
+
             SetupBottomMenu();
             BuildBusyOverlay();
             ConfigureNavigationItems();
@@ -302,17 +312,33 @@ namespace vault.iOS
                 _collectionView.ScrollIndicatorInsets = new UIEdgeInsets(0, 0, bottomInset, 0);
             }
 
-            if (_openVaultCenteredButton != null)
+            if (_openVaultCenteredButton != null || _createVaultCenteredButton != null)
             {
                 nfloat buttonWidth = view.Bounds.Width - (nfloat)40f;
                 if (buttonWidth > 250f)
                     buttonWidth = 250f;
                 nfloat buttonHeight = 54f;
-                _openVaultCenteredButton.Frame = new CGRect(
-                    (view.Bounds.Width - buttonWidth) / 2f,
-                    (view.Bounds.Height - buttonHeight) / 2f,
-                    buttonWidth,
-                    buttonHeight);
+                nfloat spacing = 12f;
+                nfloat totalHeight = (buttonHeight * 2f) + spacing;
+                nfloat startY = (view.Bounds.Height - totalHeight) / 2f;
+
+                if (_openVaultCenteredButton != null)
+                {
+                    _openVaultCenteredButton.Frame = new CGRect(
+                        (view.Bounds.Width - buttonWidth) / 2f,
+                        startY,
+                        buttonWidth,
+                        buttonHeight);
+                }
+
+                if (_createVaultCenteredButton != null)
+                {
+                    _createVaultCenteredButton.Frame = new CGRect(
+                        (view.Bounds.Width - buttonWidth) / 2f,
+                        startY + buttonHeight + spacing,
+                        buttonWidth,
+                        buttonHeight);
+                }
             }
 
             UpdatePreviewLayout();
@@ -574,6 +600,8 @@ namespace vault.iOS
 
             if (_openVaultCenteredButton != null)
                 _openVaultCenteredButton.Hidden = hasVault;
+            if (_createVaultCenteredButton != null)
+                _createVaultCenteredButton.Hidden = hasVault;
 
             if (!hasVault)
             {
@@ -1505,6 +1533,151 @@ namespace vault.iOS
                 });
 
             await Task.CompletedTask;
+        }
+
+        private void PromptCreateVaultSettingsMenu()
+        {
+            UIAlertController sheet = UIAlertController.Create(
+                "Nuovo vault",
+                "Scegli formato e impostazioni di protezione",
+                UIAlertControllerStyle.ActionSheet);
+
+            VaultStorageFormat[] formats =
+            {
+                VaultStorageFormat.Extended,
+                VaultStorageFormat.Ultra,
+                VaultStorageFormat.Legacy
+            };
+
+            foreach (VaultStorageFormat format in formats)
+            {
+                sheet.AddAction(UIAlertAction.Create(
+                    $"Formato {GetStorageFormatLabel(format)}",
+                    UIAlertActionStyle.Default,
+                    __ => PromptCreateVaultDetails(format)));
+            }
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private void PromptCreateVaultDetails(VaultStorageFormat format)
+        {
+            UIAlertController alert = UIAlertController.Create(
+                "Crea vault",
+                $"Formato: {GetStorageFormatLabel(format)}",
+                UIAlertControllerStyle.Alert);
+
+            alert.AddTextField(field =>
+            {
+                field.Placeholder = "Nome vault";
+                field.Text = "vault_ios";
+                field.ClearButtonMode = UITextFieldViewMode.WhileEditing;
+            });
+            alert.AddTextField(field =>
+            {
+                field.Placeholder = "Password";
+                field.SecureTextEntry = true;
+            });
+            alert.AddTextField(field =>
+            {
+                field.Placeholder = "Conferma password";
+                field.SecureTextEntry = true;
+            });
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, __ =>
+            {
+                string requestedName = alert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
+                string password = alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
+                string confirm = alert.TextFields?.ElementAtOrDefault(2)?.Text ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(password))
+                {
+                    ShowError("Inserisci una password valida.");
+                    return;
+                }
+
+                if (!string.Equals(password, confirm, StringComparison.Ordinal))
+                {
+                    ShowError("Le password non coincidono.");
+                    return;
+                }
+
+                string vaultPath = BuildNewVaultPath(requestedName);
+                _ = CreateVaultFromIosAsync(vaultPath, password, format);
+            }));
+
+            PresentViewController(alert, true, null);
+        }
+
+        private async Task CreateVaultFromIosAsync(string vaultPath, string password, VaultStorageFormat format)
+        {
+            await RunBusyWithProgressAsync("Creazione vault...", async progress =>
+            {
+                await Task.Run(() =>
+                {
+                    var manager = new VaultManager();
+                    manager.CreateVault(vaultPath, password, format, progress);
+                });
+
+                NSUrl vaultUrl = NSUrl.FromFilename(vaultPath);
+                VaultPortableReader reader = await Task.Run(() => OpenVaultReader(vaultUrl, password));
+
+                _session?.Dispose();
+                _session = reader;
+                _vaultUrl = vaultUrl;
+                _sessionPassword = password;
+                _currentFolder = string.Empty;
+                _isSelectionMode = false;
+                _selectedItemIds.Clear();
+                ClearThumbnailCache();
+                ClearThumbnailDiskCache();
+                ReloadFolderItems();
+            });
+        }
+
+        private static string BuildNewVaultPath(string requestedName)
+        {
+            string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            string vaultsDirectory = Path.Combine(documentsDirectory, "Vaults");
+            Directory.CreateDirectory(vaultsDirectory);
+
+            string fileName = NormalizeVaultFileName(requestedName);
+            string candidatePath = Path.Combine(vaultsDirectory, fileName);
+            if (!File.Exists(candidatePath))
+                return candidatePath;
+
+            string baseName = Path.GetFileNameWithoutExtension(fileName);
+            string extension = Path.GetExtension(fileName);
+            int index = 2;
+
+            while (true)
+            {
+                string indexedName = $"{baseName}_{index}{extension}";
+                candidatePath = Path.Combine(vaultsDirectory, indexedName);
+                if (!File.Exists(candidatePath))
+                    return candidatePath;
+
+                index++;
+            }
+        }
+
+        private static string NormalizeVaultFileName(string requestedName)
+        {
+            string name = (requestedName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name))
+                name = "vault_ios";
+
+            foreach (char invalid in Path.GetInvalidFileNameChars())
+                name = name.Replace(invalid, '_');
+
+            name = name.Replace('/', '_').Replace('\\', '_');
+            if (name.EndsWith(".vault", StringComparison.OrdinalIgnoreCase))
+                return name;
+
+            return $"{name}.vault";
         }
 
         private async Task PickFilesToAddAsync()
