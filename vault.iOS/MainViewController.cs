@@ -327,10 +327,10 @@ namespace vault.iOS
 
         private void SetupBottomMenu()
         {
-            _vaultTabItem = new UITabBarItem("Apri", UIImage.GetSystemImage("lock.open"), 0);
+            _vaultTabItem = new UITabBarItem("Sposta", UIImage.GetSystemImage("arrowshape.turn.up.right"), 0);
             _addTabItem = new UITabBarItem("Aggiungi", UIImage.GetSystemImage("plus.circle"), 1);
             _viewTabItem = new UITabBarItem("Anteprime", UIImage.GetSystemImage("square.grid.2x2"), 2);
-            _renameTabItem = new UITabBarItem("Selezione", UIImage.GetSystemImage("checkmark.circle"), 3);
+            _renameTabItem = new UITabBarItem("Rimuovi", UIImage.GetSystemImage("trash"), 3);
             _settingsTabItem = new UITabBarItem("Impostazioni", UIImage.GetSystemImage("gearshape"), 4);
 
             _bottomTabBar = new UITabBar
@@ -366,10 +366,8 @@ namespace vault.iOS
 
             if (ReferenceEquals(item, _vaultTabItem))
             {
-                if (_session == null)
-                    _ = PickVaultToOpenAsync();
-                else
-                    PromptCloseVault();
+                if (_session != null)
+                    HandleMoveRequestFromBottomMenu();
                 return;
             }
 
@@ -390,7 +388,7 @@ namespace vault.iOS
 
             if (ReferenceEquals(item, _renameTabItem))
             {
-                ToggleSelectionModeFromBottomMenu();
+                HandleTopRemoveRequest();
                 return;
             }
 
@@ -398,6 +396,19 @@ namespace vault.iOS
             {
                 OpenSettingsMenu();
             }
+        }
+
+        private void HandleMoveRequestFromBottomMenu()
+        {
+            if (_session == null)
+                return;
+            if (_selectedItemIds.Count == 0)
+            {
+                ShowError("Seleziona uno o piu elementi da spostare.");
+                return;
+            }
+
+            OpenMoveDestinationPage(_selectedItemIds.ToArray());
         }
 
         private void ToggleSelectionModeFromBottomMenu()
@@ -542,8 +553,8 @@ namespace vault.iOS
 
             if (_vaultTabItem != null)
             {
-                _vaultTabItem.Title = hasVault ? "Chiudi" : "Apri";
-                _vaultTabItem.Image = UIImage.GetSystemImage(hasVault ? "lock.slash" : "lock.open");
+                _vaultTabItem.Title = "Sposta";
+                _vaultTabItem.Image = UIImage.GetSystemImage("arrowshape.turn.up.right");
             }
 
             if (_viewTabItem != null)
@@ -554,8 +565,8 @@ namespace vault.iOS
 
             if (_renameTabItem != null)
             {
-                _renameTabItem.Title = _isSelectionMode ? "Esci" : "Selezione";
-                _renameTabItem.Image = UIImage.GetSystemImage(_isSelectionMode ? "xmark.circle" : "checkmark.circle");
+                _renameTabItem.Title = "Rimuovi";
+                _renameTabItem.Image = UIImage.GetSystemImage("trash");
             }
 
             if (_bottomTabBar != null)
@@ -604,15 +615,12 @@ namespace vault.iOS
                 UIBarButtonItemStyle.Plain,
                 (_, _) => HandleRenameRequest());
 
-            UIBarButtonItem removeButton = new UIBarButtonItem(
-                "Rimuovi",
+            UIBarButtonItem selectionButton = new UIBarButtonItem(
+                _isSelectionMode ? "Esci" : "Selezione",
                 UIBarButtonItemStyle.Plain,
-                (_, _) => HandleTopRemoveRequest())
-            {
-                TintColor = UIColor.FromRGB(255, 59, 48)
-            };
+                (_, _) => ToggleSelectionModeFromBottomMenu());
 
-            NavigationItem.RightBarButtonItems = new[] { removeButton };
+            NavigationItem.RightBarButtonItems = new[] { selectionButton };
         }
 
         private void ApplyViewModeVisibility()
@@ -928,6 +936,8 @@ namespace vault.iOS
                     sheet.AddAction(UIAlertAction.Create("Sposta selezione", UIAlertActionStyle.Default, __ => PromptMoveSelectedItems()));
                     sheet.AddAction(UIAlertAction.Create("Elimina selezione", UIAlertActionStyle.Destructive, __ => PromptDeleteSelectedItems()));
                 }
+
+                sheet.AddAction(UIAlertAction.Create("Chiudi vault", UIAlertActionStyle.Destructive, __ => PromptCloseVault()));
             }
 
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
@@ -1256,35 +1266,40 @@ namespace vault.iOS
             if (_session == null || _selectedItemIds.Count == 0)
                 return;
 
-            Guid[] selectedIds = _selectedItemIds.ToArray();
-            IReadOnlyList<string> folders = _session.GetAllFolderPaths();
-            UIAlertController sheet = UIAlertController.Create(
-                "Sposta selezione",
-                $"{selectedIds.Length} elementi selezionati",
-                UIAlertControllerStyle.ActionSheet);
+            OpenMoveDestinationPage(_selectedItemIds.ToArray());
+        }
 
-            foreach (string folder in folders)
+        private void OpenMoveDestinationPage(Guid[] selectedIds)
+        {
+            if (_session == null || NavigationController == null || selectedIds.Length == 0)
+                return;
+
+            var destinationPage = new MoveDestinationViewController(
+                _session,
+                _currentFolder,
+                selectedIds,
+                (destinationPath, idsToMove) => _ = MoveSelectedItemsToDestinationAsync(idsToMove, destinationPath));
+
+            NavigationController.PushViewController(destinationPage, true);
+        }
+
+        private async Task MoveSelectedItemsToDestinationAsync(Guid[] selectedIds, string destinationPath)
+        {
+            if (_session == null || selectedIds.Length == 0)
+                return;
+
+            string normalizedDestination = NormalizeFolderPath(destinationPath);
+            await RunBusyAsync("Spostamento elementi...", async () =>
             {
-                string label = string.IsNullOrWhiteSpace(folder) ? "/" : $"/{folder}";
-                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, __ =>
-                {
-                    _ = RunBusyAsync("Spostamento elementi...", async () =>
-                    {
-                        if (_session == null)
-                            return;
+                if (_session == null)
+                    return;
 
-                        _session.MoveItems(selectedIds, folder);
-                        await PersistVaultAsync();
-                        EnsureCurrentFolderStillExists();
-                        ExitSelectionMode(clearSelection: true);
-                        ReloadFolderItems();
-                    });
-                }));
-            }
-
-            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-            ConfigurePopover(sheet);
-            PresentViewController(sheet, true, null);
+                _session.MoveItems(selectedIds, normalizedDestination);
+                await PersistVaultAsync();
+                EnsureCurrentFolderStillExists();
+                ExitSelectionMode(clearSelection: true);
+                ReloadFolderItems();
+            });
         }
 
         private void PromptDeleteSelectedItems()
@@ -2874,6 +2889,250 @@ namespace vault.iOS
             }
         }
 
+        private sealed class MoveDestinationViewController : UIViewController
+        {
+            private const string MoveCellId = "MoveDestinationCell";
+
+            private readonly VaultPortableReader _session;
+            private readonly Guid[] _itemIds;
+            private readonly Action<string, Guid[]> _onMoveConfirmed;
+            private readonly List<string> _folderPaths = new();
+            private readonly List<Guid> _createdFolderIds = new();
+            private string _selectedDestination;
+            private bool _confirmedMove;
+            private UITableView? _tableView;
+
+            public MoveDestinationViewController(
+                VaultPortableReader session,
+                string currentFolder,
+                Guid[] itemIds,
+                Action<string, Guid[]> onMoveConfirmed)
+            {
+                _session = session ?? throw new ArgumentNullException(nameof(session));
+                _itemIds = itemIds ?? Array.Empty<Guid>();
+                _selectedDestination = NormalizeFolderPath(currentFolder);
+                _onMoveConfirmed = onMoveConfirmed ?? throw new ArgumentNullException(nameof(onMoveConfirmed));
+            }
+
+            public override void ViewDidLoad()
+            {
+                base.ViewDidLoad();
+
+                View!.BackgroundColor = UIColor.White;
+                Title = "Sposta elementi";
+                NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
+                NavigationItem.RightBarButtonItems = new[]
+                {
+                    new UIBarButtonItem("Sposta qui", UIBarButtonItemStyle.Done, (_, _) => ConfirmMove()),
+                    new UIBarButtonItem("Nuova", UIBarButtonItemStyle.Plain, (_, _) => PromptCreateFolder(_selectedDestination))
+                };
+
+                _tableView = new UITableView(View.Bounds, UITableViewStyle.InsetGrouped)
+                {
+                    AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight,
+                    Source = new MoveDestinationSource(this)
+                };
+                View.AddSubview(_tableView);
+
+                ReloadFolders();
+            }
+
+            public override void ViewDidDisappear(bool animated)
+            {
+                base.ViewDidDisappear(animated);
+
+                if (IsMovingFromParentViewController && !_confirmedMove)
+                    RollbackCreatedFolders();
+            }
+
+            private void ReloadFolders()
+            {
+                _folderPaths.Clear();
+                _folderPaths.AddRange(_session.GetAllFolderPaths().OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+                EnsureSelectedDestinationExists();
+                _tableView?.ReloadData();
+            }
+
+            private void EnsureSelectedDestinationExists()
+            {
+                if (_folderPaths.Any(path => string.Equals(path, _selectedDestination, StringComparison.OrdinalIgnoreCase)))
+                    return;
+
+                string probe = _selectedDestination;
+                while (!string.IsNullOrWhiteSpace(probe))
+                {
+                    probe = GetParentPath(probe);
+                    if (_folderPaths.Any(path => string.Equals(path, probe, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        _selectedDestination = probe;
+                        return;
+                    }
+                }
+
+                _selectedDestination = string.Empty;
+            }
+
+            private void HandleFolderTapped(int index)
+            {
+                if (index < 0 || index >= _folderPaths.Count)
+                    return;
+
+                _selectedDestination = _folderPaths[index];
+                _tableView?.ReloadData();
+            }
+
+            private void ConfirmMove()
+            {
+                if (_itemIds.Length == 0)
+                {
+                    ShowError("Nessun elemento selezionato.");
+                    return;
+                }
+
+                _confirmedMove = true;
+                _createdFolderIds.Clear();
+                string destination = _selectedDestination;
+                Guid[] ids = _itemIds.ToArray();
+                NavigationController?.PopViewController(true);
+                BeginInvokeOnMainThread(() => _onMoveConfirmed(destination, ids));
+            }
+
+            private void PromptCreateFolder(string parentPath)
+            {
+                UIAlertController alert = UIAlertController.Create("Nuova cartella", null, UIAlertControllerStyle.Alert);
+                alert.AddTextField(field =>
+                {
+                    field.Placeholder = "Nome cartella";
+                    field.ClearButtonMode = UITextFieldViewMode.WhileEditing;
+                });
+
+                alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+                alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, _ =>
+                {
+                    string rawName = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
+                    string name = NormalizeFolderName(rawName);
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        ShowError("Inserisci un nome cartella valido.");
+                        return;
+                    }
+
+                    string normalizedParent = NormalizeFolderPath(parentPath);
+
+                    try
+                    {
+                        VaultFileItem folder = _session.CreateFolder(name, normalizedParent);
+                        _createdFolderIds.Add(folder.Id);
+                        _selectedDestination = NormalizeFolderPath(folder.FullPath);
+                        ReloadFolders();
+                    }
+                    catch (Exception ex)
+                    {
+                        ShowError(ex.Message);
+                    }
+                }));
+
+                PresentViewController(alert, true, null);
+            }
+
+            private void RollbackCreatedFolders()
+            {
+                if (_createdFolderIds.Count == 0)
+                    return;
+
+                try
+                {
+                    _session.DeleteItems(_createdFolderIds.ToArray());
+                }
+                catch
+                {
+                    // Best effort rollback.
+                }
+
+                _createdFolderIds.Clear();
+            }
+
+            private static string NormalizeFolderName(string name)
+            {
+                string trimmed = name?.Trim() ?? string.Empty;
+                if (trimmed.Contains('/') || trimmed.Contains('\\'))
+                    return string.Empty;
+                return trimmed;
+            }
+
+            private static string NormalizeFolderPath(string? path)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    return string.Empty;
+
+                return path.Trim().Trim('/');
+            }
+
+            private static string GetParentPath(string folderPath)
+            {
+                if (string.IsNullOrWhiteSpace(folderPath))
+                    return string.Empty;
+
+                int idx = folderPath.LastIndexOf('/');
+                return idx < 0 ? string.Empty : folderPath[..idx];
+            }
+
+            private void ShowError(string message)
+            {
+                UIAlertController alert = UIAlertController.Create(
+                    "Operazione non riuscita",
+                    string.IsNullOrWhiteSpace(message) ? "Errore sconosciuto." : message,
+                    UIAlertControllerStyle.Alert);
+                alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, null));
+                PresentViewController(alert, true, null);
+            }
+
+            private sealed class MoveDestinationSource : UITableViewSource
+            {
+                private readonly MoveDestinationViewController _owner;
+
+                public MoveDestinationSource(MoveDestinationViewController owner)
+                {
+                    _owner = owner;
+                }
+
+                public override nint RowsInSection(UITableView tableView, nint section) =>
+                    _owner._folderPaths.Count;
+
+                public override UITableViewCell GetCell(UITableView tableView, NSIndexPath indexPath)
+                {
+                    UITableViewCell cell = tableView.DequeueReusableCell(MoveCellId)
+                        ?? new UITableViewCell(UITableViewCellStyle.Subtitle, MoveCellId);
+
+                    string path = _owner._folderPaths[indexPath.Row];
+                    string displayName = string.IsNullOrWhiteSpace(path)
+                        ? "/"
+                        : path.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? path;
+
+                    int depth = string.IsNullOrWhiteSpace(path)
+                        ? 0
+                        : path.Split('/', StringSplitOptions.RemoveEmptyEntries).Length;
+                    cell.IndentationLevel = depth;
+                    cell.IndentationWidth = 14f;
+
+                    UIListContentConfiguration content = cell.DefaultContentConfiguration;
+                    content.Text = $"[DIR] {displayName}";
+                    content.SecondaryText = string.IsNullOrWhiteSpace(path) ? "/" : $"/{path}";
+                    cell.ContentConfiguration = content;
+                    cell.Accessory = string.Equals(path, _owner._selectedDestination, StringComparison.OrdinalIgnoreCase)
+                        ? UITableViewCellAccessory.Checkmark
+                        : UITableViewCellAccessory.None;
+                    return cell;
+                }
+
+                public override void RowSelected(UITableView tableView, NSIndexPath indexPath)
+                {
+                    tableView.DeselectRow(indexPath, true);
+                    _owner.HandleFolderTapped(indexPath.Row);
+                }
+            }
+        }
+
         private sealed class FolderTreeViewController : UIViewController
         {
             private const string FolderCellId = "FolderTreeCell";
@@ -2969,7 +3228,7 @@ namespace vault.iOS
 
                 sheet.AddAction(UIAlertAction.Create("Nuova cartella qui", UIAlertActionStyle.Default, _ =>
                 {
-                    PromptCreateFolder(folderPath);
+                    BeginInvokeOnMainThread(() => PromptCreateFolder(folderPath));
                 }));
 
                 if (!string.IsNullOrWhiteSpace(folderPath))
@@ -3002,11 +3261,19 @@ namespace vault.iOS
                 alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
                 alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, _ =>
                 {
-                    string name = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
+                    string rawName = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
+                    string name = NormalizeFolderName(rawName);
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        ShowError("Inserisci un nome cartella valido.");
+                        return;
+                    }
+
+                    string normalizedParent = NormalizeFolderPath(parentPath);
                     try
                     {
-                        VaultFileItem folder = _session.CreateFolder(name, parentPath);
-                        _selectedPath = folder.ParentPath;
+                        VaultFileItem folder = _session.CreateFolder(name, normalizedParent);
+                        _selectedPath = NormalizeFolderPath(folder.FullPath);
                         _hasChanges = true;
                         ReloadFolders();
                     }
@@ -3137,6 +3404,14 @@ namespace vault.iOS
                     return string.Empty;
 
                 return path.Trim().Trim('/');
+            }
+
+            private static string NormalizeFolderName(string name)
+            {
+                string trimmed = name?.Trim() ?? string.Empty;
+                if (trimmed.Contains('/') || trimmed.Contains('\\'))
+                    return string.Empty;
+                return trimmed;
             }
 
             private static string GetParentPath(string folderPath)
