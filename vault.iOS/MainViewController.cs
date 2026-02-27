@@ -33,6 +33,7 @@ namespace vault.iOS
         private const int ThumbnailMaxPixelSize = 640;
         private const int ThumbnailDecodeConcurrency = 4;
         private const long LegacyAutoUpgradeThresholdBytes = 180L * 1024 * 1024;
+        private const long LegacyUltraUpgradeThresholdBytes = 700L * 1024 * 1024;
         private const long PersistSafetyMarginBytes = 96L * 1024 * 1024;
         private const int VaultPersistCopyBufferSize = 1024 * 1024;
 
@@ -1321,7 +1322,7 @@ namespace vault.iOS
                 return;
 
             string normalizedDestination = NormalizeFolderPath(destinationPath);
-            await RunBusyAsync("Spostamento elementi...", async () =>
+            await RunBusyWithProgressAsync("Spostamento elementi...", async progress =>
             {
                 if (_session == null)
                     return;
@@ -1329,9 +1330,11 @@ namespace vault.iOS
                 var createdFolderIds = new List<Guid>();
                 try
                 {
+                    ReportProgress(progress, 6d);
                     EnsureDestinationFolderExistsForMove(normalizedDestination, createdFolderIds);
                     _session.MoveItems(selectedIds, normalizedDestination);
-                    await PersistVaultAsync();
+                    ReportProgress(progress, 18d);
+                    await PersistVaultAsync(CreateScaledProgress(progress, 20d, 100d));
                     EnsureCurrentFolderStillExists();
                     ExitSelectionMode(clearSelection: true);
                     ReloadFolderItems();
@@ -1872,7 +1875,7 @@ namespace vault.iOS
                     return;
                 }
 
-                _ = RunBusyAsync("Creazione cartella...", async () =>
+                _ = RunBusyWithProgressAsync("Creazione cartella...", async progress =>
                 {
                     if (_session == null)
                         return;
@@ -1882,7 +1885,8 @@ namespace vault.iOS
                     {
                         VaultFileItem created = _session.CreateFolder(name, _currentFolder);
                         createdId = created.Id;
-                        await PersistVaultAsync();
+                        ReportProgress(progress, 15d);
+                        await PersistVaultAsync(CreateScaledProgress(progress, 18d, 100d));
                         ReloadFolderItems();
                     }
                     catch
@@ -2128,11 +2132,41 @@ namespace vault.iOS
             if (_session == null)
                 return;
 
+            if (TryPresentImageGallery(item))
+            {
+                await Task.CompletedTask;
+                return;
+            }
+
             await RunBusyAsync("Preparazione file...", async () =>
             {
                 string tempPath = await Task.Run(() => WriteTemporaryFileFromVault(_session, item));
                 PresentDocumentPreview(tempPath);
             });
+        }
+
+        private bool TryPresentImageGallery(VaultFileItem item)
+        {
+            if (_session == null || item.IsFolder || !IsImagePreviewCandidate(item.FileName))
+                return false;
+
+            List<VaultFileItem> images = _visibleItems
+                .Where(visible => !visible.IsFolder && IsImagePreviewCandidate(visible.FileName))
+                .ToList();
+            if (images.Count == 0)
+                return false;
+
+            int startIndex = images.FindIndex(image => image.Id == item.Id);
+            if (startIndex < 0)
+                return false;
+
+            var viewer = new ImageGalleryViewController(_session, images, startIndex);
+            var nav = new UINavigationController(viewer)
+            {
+                ModalPresentationStyle = UIModalPresentationStyle.FullScreen
+            };
+            PresentViewController(nav, true, null);
+            return true;
         }
 
         private async Task ExportFileAsync(VaultFileItem item)
@@ -2200,13 +2234,14 @@ namespace vault.iOS
 
                 sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, __ =>
                 {
-                    _ = RunBusyAsync("Spostamento...", async () =>
+                    _ = RunBusyWithProgressAsync("Spostamento...", async progress =>
                     {
                         if (_session == null)
                             return;
 
                         _session.MoveItems(new[] { item.Id }, folder);
-                        await PersistVaultAsync();
+                        ReportProgress(progress, 14d);
+                        await PersistVaultAsync(CreateScaledProgress(progress, 18d, 100d));
                         EnsureCurrentFolderStillExists();
                         ReloadFolderItems();
                     });
@@ -2268,7 +2303,11 @@ namespace vault.iOS
             if (payloadBytes < LegacyAutoUpgradeThresholdBytes)
                 return;
 
-            session.ChangeStorageFormat(VaultStorageFormat.Extended);
+            VaultStorageFormat targetFormat = payloadBytes >= LegacyUltraUpgradeThresholdBytes
+                ? VaultStorageFormat.Ultra
+                : VaultStorageFormat.Extended;
+
+            session.ChangeStorageFormat(targetFormat);
         }
 
         private static void EnsureEnoughFreeSpaceForPersist(VaultPortableReader session, NSUrl vaultUrl)
@@ -2453,6 +2492,25 @@ namespace vault.iOS
             }
 
             return $"{value:0.#} {units[unitIndex]}";
+        }
+
+        private static void ReportProgress(IProgress<double>? progress, double value)
+        {
+            progress?.Report(Math.Max(0d, Math.Min(100d, value)));
+        }
+
+        private static IProgress<double> CreateScaledProgress(IProgress<double>? progress, double startPercent, double endPercent)
+        {
+            double safeStart = Math.Max(0d, Math.Min(100d, startPercent));
+            double safeEnd = Math.Max(safeStart, Math.Min(100d, endPercent));
+            double span = safeEnd - safeStart;
+
+            return new Progress<double>(value =>
+            {
+                double inner = Math.Max(0d, Math.Min(100d, value));
+                double mapped = safeStart + (inner / 100d) * span;
+                ReportProgress(progress, mapped);
+            });
         }
 
         private async Task RunBusyAsync(string message, Func<Task> action)
@@ -4192,6 +4250,299 @@ namespace vault.iOS
                     tableView.DeselectRow(indexPath, true);
                     _owner.HandleFolderTapped(indexPath.Row);
                 }
+            }
+        }
+
+        private sealed class ImageGalleryViewController : UIViewController
+        {
+            private readonly VaultPortableReader _session;
+            private readonly IReadOnlyList<VaultFileItem> _images;
+            private readonly Dictionary<Guid, string> _ownedTempPaths = new();
+            private readonly object _pathLock = new();
+
+            private int _currentIndex;
+            private int _loadVersion;
+            private int _targetPixelSize = 1800;
+            private bool _cleanedUp;
+
+            private UIImage? _currentImage;
+            private UIImageView? _imageView;
+            private UILabel? _counterLabel;
+            private UILabel? _hintLabel;
+            private UILabel? _errorLabel;
+            private UIActivityIndicatorView? _spinner;
+
+            public ImageGalleryViewController(VaultPortableReader session, IReadOnlyList<VaultFileItem> images, int startIndex)
+            {
+                _session = session ?? throw new ArgumentNullException(nameof(session));
+                _images = images ?? throw new ArgumentNullException(nameof(images));
+                _currentIndex = Math.Max(0, Math.Min(startIndex, Math.Max(0, _images.Count - 1)));
+            }
+
+            public override void ViewDidLoad()
+            {
+                base.ViewDidLoad();
+
+                View!.BackgroundColor = UIColor.Black;
+                NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
+                NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
+                    "Chiudi",
+                    UIBarButtonItemStyle.Done,
+                    (_, _) => DismissViewController(true, null));
+
+                _imageView = new UIImageView
+                {
+                    ContentMode = UIViewContentMode.ScaleAspectFit,
+                    BackgroundColor = UIColor.Black,
+                    UserInteractionEnabled = true
+                };
+
+                _spinner = new UIActivityIndicatorView(UIActivityIndicatorViewStyle.Large)
+                {
+                    Color = UIColor.White,
+                    HidesWhenStopped = true
+                };
+
+                _counterLabel = new UILabel
+                {
+                    TextColor = UIColor.White,
+                    Font = UIFont.SystemFontOfSize(13, UIFontWeight.Semibold),
+                    TextAlignment = UITextAlignment.Center
+                };
+
+                _hintLabel = new UILabel
+                {
+                    TextColor = UIColor.FromWhiteAlpha(1f, 0.72f),
+                    Font = UIFont.SystemFontOfSize(12f),
+                    TextAlignment = UITextAlignment.Center,
+                    Text = "Scorri a sinistra/destra"
+                };
+
+                _errorLabel = new UILabel
+                {
+                    TextColor = UIColor.FromRGB(255, 105, 97),
+                    Font = UIFont.SystemFontOfSize(14, UIFontWeight.Medium),
+                    TextAlignment = UITextAlignment.Center,
+                    Lines = 2,
+                    Hidden = true
+                };
+
+                View.AddSubview(_imageView);
+                View.AddSubview(_spinner);
+                View.AddSubview(_counterLabel);
+                View.AddSubview(_hintLabel);
+                View.AddSubview(_errorLabel);
+
+                var swipeLeft = new UISwipeGestureRecognizer(() => MoveRelative(+1))
+                {
+                    Direction = UISwipeGestureRecognizerDirection.Left
+                };
+                var swipeRight = new UISwipeGestureRecognizer(() => MoveRelative(-1))
+                {
+                    Direction = UISwipeGestureRecognizerDirection.Right
+                };
+                View.AddGestureRecognizer(swipeLeft);
+                View.AddGestureRecognizer(swipeRight);
+
+                UpdateHeader();
+                _ = LoadCurrentImageAsync();
+            }
+
+            public override void ViewDidLayoutSubviews()
+            {
+                base.ViewDidLayoutSubviews();
+                if (View == null)
+                    return;
+
+                nfloat width = View.Bounds.Width;
+                nfloat height = View.Bounds.Height;
+                _imageView!.Frame = new CGRect(0f, 0f, width, height);
+                _spinner!.Center = new CGPoint(width / 2f, height / 2f);
+
+                _counterLabel!.Frame = new CGRect(20f, height - 72f, width - 40f, 20f);
+                _hintLabel!.Frame = new CGRect(20f, height - 52f, width - 40f, 18f);
+                _errorLabel!.Frame = new CGRect(20f, height - 102f, width - 40f, 42f);
+
+                nfloat screenScale = UIScreen.MainScreen.Scale;
+                double basePixels = Math.Max(width, height) * screenScale * 1.8d;
+                _targetPixelSize = (int)Math.Max(1200d, Math.Min(3200d, basePixels));
+            }
+
+            public override void ViewDidDisappear(bool animated)
+            {
+                base.ViewDidDisappear(animated);
+                if (IsBeingDismissed || NavigationController?.IsBeingDismissed == true)
+                    Cleanup();
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                    Cleanup();
+
+                base.Dispose(disposing);
+            }
+
+            private void MoveRelative(int delta)
+            {
+                if (_images.Count <= 1)
+                    return;
+
+                int next = _currentIndex + delta;
+                if (next < 0 || next >= _images.Count)
+                    return;
+
+                _currentIndex = next;
+                UpdateHeader();
+                _ = LoadCurrentImageAsync();
+            }
+
+            private void UpdateHeader()
+            {
+                if (_images.Count == 0)
+                {
+                    Title = "Immagini";
+                    if (_counterLabel != null)
+                        _counterLabel.Text = string.Empty;
+                    return;
+                }
+
+                VaultFileItem current = _images[_currentIndex];
+                Title = current.FileName;
+                if (_counterLabel != null)
+                    _counterLabel.Text = $"{_currentIndex + 1} / {_images.Count}";
+            }
+
+            private async Task LoadCurrentImageAsync()
+            {
+                if (_images.Count == 0 || _imageView == null || _spinner == null)
+                    return;
+
+                int loadVersion = Interlocked.Increment(ref _loadVersion);
+                if (_errorLabel != null)
+                    _errorLabel.Hidden = true;
+                _spinner.StartAnimating();
+
+                VaultFileItem current = _images[_currentIndex];
+                int targetPixels = _targetPixelSize;
+
+                try
+                {
+                    string sourcePath = await Task.Run(() => ResolveImagePath(current)).ConfigureAwait(false);
+                    UIImage? image = await Task.Run(() => MainViewController.CreateDownsampledThumbnail(sourcePath, targetPixels))
+                        .ConfigureAwait(false);
+                    if (image == null)
+                        throw new InvalidOperationException("Anteprima non disponibile.");
+
+                    BeginInvokeOnMainThread(() =>
+                    {
+                        if (loadVersion != Volatile.Read(ref _loadVersion))
+                        {
+                            image.Dispose();
+                            return;
+                        }
+
+                        _currentImage?.Dispose();
+                        _currentImage = image;
+                        _imageView.Image = image;
+                        _spinner.StopAnimating();
+                        if (_errorLabel != null)
+                            _errorLabel.Hidden = true;
+                        PrefetchAdjacent();
+                    });
+                }
+                catch
+                {
+                    BeginInvokeOnMainThread(() =>
+                    {
+                        if (loadVersion != Volatile.Read(ref _loadVersion))
+                            return;
+
+                        _spinner.StopAnimating();
+                        if (_errorLabel != null)
+                            _errorLabel.Hidden = false;
+                        if (_errorLabel != null)
+                            _errorLabel.Text = "Impossibile caricare questa immagine.";
+                    });
+                }
+            }
+
+            private void PrefetchAdjacent()
+            {
+                if (_images.Count <= 1)
+                    return;
+
+                int prev = _currentIndex - 1;
+                int next = _currentIndex + 1;
+
+                if (prev >= 0)
+                    _ = Task.Run(() => WarmImagePath(_images[prev]));
+                if (next < _images.Count)
+                    _ = Task.Run(() => WarmImagePath(_images[next]));
+            }
+
+            private void WarmImagePath(VaultFileItem item)
+            {
+                try
+                {
+                    ResolveImagePath(item);
+                }
+                catch
+                {
+                    // Best effort prefetch.
+                }
+            }
+
+            private string ResolveImagePath(VaultFileItem item)
+            {
+                if (_session.TryGetLocalContentPath(item.Id, out string localPath) && File.Exists(localPath))
+                    return localPath;
+
+                lock (_pathLock)
+                {
+                    if (_ownedTempPaths.TryGetValue(item.Id, out string cached) && File.Exists(cached))
+                        return cached;
+                }
+
+                string tempPath = MainViewController.CreateTemporaryPath(item.FileName);
+                using (var output = new FileStream(
+                    tempPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    VaultPersistCopyBufferSize,
+                    FileOptions.SequentialScan))
+                {
+                    _session.CopyFileContentToStream(item.Id, output);
+                }
+
+                lock (_pathLock)
+                {
+                    _ownedTempPaths[item.Id] = tempPath;
+                }
+
+                return tempPath;
+            }
+
+            private void Cleanup()
+            {
+                if (_cleanedUp)
+                    return;
+                _cleanedUp = true;
+
+                Interlocked.Increment(ref _loadVersion);
+                _currentImage?.Dispose();
+                _currentImage = null;
+
+                List<string> tempPaths;
+                lock (_pathLock)
+                {
+                    tempPaths = _ownedTempPaths.Values.ToList();
+                    _ownedTempPaths.Clear();
+                }
+
+                foreach (string path in tempPaths)
+                    MainViewController.TryDeletePath(path);
             }
         }
 
