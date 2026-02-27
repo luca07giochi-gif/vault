@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CoreGraphics;
@@ -33,6 +34,7 @@ namespace vault.iOS
         private const int ThumbnailDecodeConcurrency = 4;
         private const long LegacyAutoUpgradeThresholdBytes = 180L * 1024 * 1024;
         private const long PersistSafetyMarginBytes = 96L * 1024 * 1024;
+        private const int VaultPersistCopyBufferSize = 1024 * 1024;
 
         private enum BrowserViewMode
         {
@@ -1875,9 +1877,30 @@ namespace vault.iOS
                     if (_session == null)
                         return;
 
-                    _session.CreateFolder(name, _currentFolder);
-                    await PersistVaultAsync();
-                    ReloadFolderItems();
+                    Guid createdId = Guid.Empty;
+                    try
+                    {
+                        VaultFileItem created = _session.CreateFolder(name, _currentFolder);
+                        createdId = created.Id;
+                        await PersistVaultAsync();
+                        ReloadFolderItems();
+                    }
+                    catch
+                    {
+                        if (_session != null && createdId != Guid.Empty)
+                        {
+                            try
+                            {
+                                _session.DeleteItems(new[] { createdId });
+                            }
+                            catch
+                            {
+                                // Best effort rollback.
+                            }
+                        }
+
+                        throw;
+                    }
                 });
             }));
 
@@ -2250,7 +2273,7 @@ namespace vault.iOS
 
         private static void EnsureEnoughFreeSpaceForPersist(VaultPortableReader session, NSUrl vaultUrl)
         {
-            long availableBytes = TryGetAvailableRuntimeBytes();
+            long availableBytes = TryGetConservativeAvailableBytes(vaultUrl.Path);
             if (availableBytes <= 0)
                 return;
 
@@ -2315,20 +2338,107 @@ namespace vault.iOS
             }
         }
 
-        private static long TryGetAvailableRuntimeBytes()
+        private static long TryGetConservativeAvailableBytes(string? destinationPath)
         {
+            long destinationFree = TryGetAvailableBytes(destinationPath);
+            long runtimeFree = TryGetAvailableBytes(GetRuntimeTempDirectoryPath());
+
+            if (destinationFree > 0 && runtimeFree > 0)
+                return Math.Min(destinationFree, runtimeFree);
+
+            if (destinationFree > 0)
+                return destinationFree;
+
+            if (runtimeFree > 0)
+                return runtimeFree;
+
+            return -1;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct StatVfsData
+        {
+            public ulong f_bsize;
+            public ulong f_frsize;
+            public ulong f_blocks;
+            public ulong f_bfree;
+            public ulong f_bavail;
+            public ulong f_files;
+            public ulong f_ffree;
+            public ulong f_favail;
+            public ulong f_fsid;
+            public ulong f_flag;
+            public ulong f_namemax;
+        }
+
+        [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "statvfs", SetLastError = true)]
+        private static extern int StatVfs(string path, out StatVfsData stat);
+
+        private static long TryGetAvailableBytes(string? targetPath)
+        {
+            string resolvedPath = ResolveSpaceProbePath(targetPath);
+            long statValue = TryGetAvailableBytesWithStatVfs(resolvedPath);
+            if (statValue > 0)
+                return statValue;
+
             try
             {
-                string tempRoot = Path.GetPathRoot(Path.GetTempPath()) ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(tempRoot))
+                string root = Path.GetPathRoot(resolvedPath) ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(root))
                     return -1;
 
-                return new DriveInfo(tempRoot).AvailableFreeSpace;
+                return new DriveInfo(root).AvailableFreeSpace;
             }
             catch
             {
                 return -1;
             }
+        }
+
+        private static long TryGetAvailableBytesWithStatVfs(string path)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    return -1;
+
+                if (StatVfs(path, out StatVfsData stat) != 0)
+                    return -1;
+
+                double bytes = (double)stat.f_bavail * stat.f_frsize;
+                if (bytes <= 0d)
+                    return -1;
+                if (bytes >= long.MaxValue)
+                    return long.MaxValue;
+
+                return (long)bytes;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private static string ResolveSpaceProbePath(string? targetPath)
+        {
+            if (string.IsNullOrWhiteSpace(targetPath))
+                return Path.GetTempPath();
+
+            string current = targetPath;
+            if (File.Exists(current))
+                current = Path.GetDirectoryName(current) ?? current;
+
+            if (Directory.Exists(current))
+                return current;
+
+            while (!string.IsNullOrWhiteSpace(current))
+            {
+                current = Path.GetDirectoryName(current);
+                if (!string.IsNullOrWhiteSpace(current) && Directory.Exists(current))
+                    return current;
+            }
+
+            return Path.GetTempPath();
         }
 
         private static string FormatByteSize(long bytes)
@@ -2669,12 +2779,24 @@ namespace vault.iOS
                 throw new IOException("Percorso file non valido.");
 
             string fileName = Path.GetFileName(path);
-            string tmpPath = CreateVaultWriteTempPath(fileName, ".tmp");
-            string backupPath = CreateVaultWriteTempPath(fileName, ".bak");
+            string? destinationDirectory = Path.GetDirectoryName(path);
+            string tmpPath = CreateVaultWriteTempPathNearDestination(path, fileName, ".tmp", out bool tmpNearDestination);
+            string backupPath = CreateVaultWriteTempPath(
+                fileName,
+                ".bak",
+                tmpNearDestination ? destinationDirectory : null);
+            string? swapBackupPath = null;
+            bool success = false;
 
             try
             {
-                using (var output = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (var output = new FileStream(
+                    tmpPath,
+                    FileMode.Create,
+                    FileAccess.Write,
+                    FileShare.None,
+                    VaultPersistCopyBufferSize,
+                    FileOptions.SequentialScan))
                 {
                     session.SaveToStream(output, progress);
                     output.Flush(flushToDisk: true);
@@ -2682,34 +2804,97 @@ namespace vault.iOS
 
                 if (!File.Exists(path))
                 {
-                    File.Move(tmpPath, path);
-                    TryDeletePath(backupPath);
+                    if (!TryMoveWithOverwrite(tmpPath, path))
+                        File.Move(tmpPath, path);
+
+                    success = true;
                     return;
                 }
 
-                if (!TryReplaceFile(tmpPath, path, backupPath))
+                // First choice: replace with overwrite move (no full backup duplication).
+                if (TryMoveWithOverwrite(tmpPath, path))
                 {
-                    if (!TryMoveWithOverwrite(tmpPath, path))
-                        OverwriteFileWithRollback(tmpPath, path, backupPath);
+                    success = true;
+                    return;
                 }
 
-                TryDeletePath(tmpPath);
-                TryDeletePath(backupPath);
+                // Second choice: two-phase rename in destination directory.
+                if (tmpNearDestination && TrySwapWithRenamedBackup(tmpPath, path, out swapBackupPath))
+                {
+                    success = true;
+                    return;
+                }
+
+                // Third choice: platform replace.
+                if (TryReplaceFile(tmpPath, path, backupPath))
+                {
+                    success = true;
+                    return;
+                }
+
+                // Last resort with explicit rollback copy.
+                OverwriteFileWithRollback(tmpPath, path, backupPath);
+                success = true;
             }
-            catch
+            finally
             {
                 TryDeletePath(tmpPath);
                 TryDeletePath(backupPath);
-                throw;
+                if (success)
+                    TryDeletePath(swapBackupPath ?? string.Empty);
             }
         }
 
-        private static string CreateVaultWriteTempPath(string baseFileName, string suffix)
+        private static string CreateVaultWriteTempPathNearDestination(
+            string destinationPath,
+            string baseFileName,
+            string suffix,
+            out bool nearDestination)
         {
+            nearDestination = false;
+            string? destinationDirectory = Path.GetDirectoryName(destinationPath);
+            if (string.IsNullOrWhiteSpace(destinationDirectory))
+                return CreateVaultWriteTempPath(baseFileName, suffix);
+
+            string candidate = CreateVaultWriteTempPath(baseFileName, suffix, destinationDirectory);
+            try
+            {
+                using (var probe = new FileStream(candidate, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                }
+
+                File.Delete(candidate);
+                nearDestination = true;
+                return candidate;
+            }
+            catch
+            {
+                TryDeletePath(candidate);
+                return CreateVaultWriteTempPath(baseFileName, suffix);
+            }
+        }
+
+        private static string CreateVaultWriteTempPath(string baseFileName, string suffix, string? preferredDirectory = null)
+        {
+            string safeBaseName = string.IsNullOrWhiteSpace(baseFileName) ? "vault" : baseFileName;
+            string fileName = $".{safeBaseName}.{Guid.NewGuid():N}{suffix}";
+
+            if (!string.IsNullOrWhiteSpace(preferredDirectory))
+            {
+                try
+                {
+                    Directory.CreateDirectory(preferredDirectory);
+                    return Path.Combine(preferredDirectory, fileName);
+                }
+                catch
+                {
+                    // Fallback to runtime directory.
+                }
+            }
+
             string runtimeRoot = GetRuntimeTempDirectoryPath();
             Directory.CreateDirectory(runtimeRoot);
-            string safeBaseName = string.IsNullOrWhiteSpace(baseFileName) ? "vault" : baseFileName;
-            return Path.Combine(runtimeRoot, $"{safeBaseName}.{Guid.NewGuid():N}{suffix}");
+            return Path.Combine(runtimeRoot, fileName);
         }
 
         private static bool TryReplaceFile(string sourcePath, string destinationPath, string backupPath)
@@ -2754,6 +2939,48 @@ namespace vault.iOS
             }
         }
 
+        private static bool TrySwapWithRenamedBackup(string sourcePath, string destinationPath, out string? backupPath)
+        {
+            backupPath = null;
+            string? destinationDirectory = Path.GetDirectoryName(destinationPath);
+            if (string.IsNullOrWhiteSpace(destinationDirectory))
+                return false;
+
+            string destinationName = Path.GetFileName(destinationPath);
+            backupPath = Path.Combine(destinationDirectory, $".{destinationName}.{Guid.NewGuid():N}.rollback");
+            bool destinationMoved = false;
+
+            try
+            {
+                File.Move(destinationPath, backupPath);
+                destinationMoved = true;
+                File.Move(sourcePath, destinationPath);
+                TryDeletePath(backupPath);
+                backupPath = null;
+                return true;
+            }
+            catch
+            {
+                if (destinationMoved)
+                {
+                    try
+                    {
+                        if (!File.Exists(destinationPath) && File.Exists(backupPath))
+                        {
+                            File.Move(backupPath, destinationPath);
+                            backupPath = null;
+                        }
+                    }
+                    catch
+                    {
+                        // Best effort rollback.
+                    }
+                }
+
+                return false;
+            }
+        }
+
         private static void OverwriteFileWithRollback(string sourcePath, string destinationPath, string backupPath)
         {
             bool hasBackup = false;
@@ -2766,10 +2993,22 @@ namespace vault.iOS
                     hasBackup = true;
                 }
 
-                using var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                using var output = new FileStream(destinationPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
+                using var input = new FileStream(
+                    sourcePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    VaultPersistCopyBufferSize,
+                    FileOptions.SequentialScan);
+                using var output = new FileStream(
+                    destinationPath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.Write,
+                    FileShare.None,
+                    VaultPersistCopyBufferSize,
+                    FileOptions.SequentialScan);
                 output.SetLength(0);
-                input.CopyTo(output);
+                input.CopyTo(output, VaultPersistCopyBufferSize);
                 output.Flush(flushToDisk: true);
             }
             catch
@@ -2778,10 +3017,22 @@ namespace vault.iOS
                 {
                     try
                     {
-                        using var backupInput = new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                        using var restoreOutput = new FileStream(destinationPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
+                        using var backupInput = new FileStream(
+                            backupPath,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.Read,
+                            VaultPersistCopyBufferSize,
+                            FileOptions.SequentialScan);
+                        using var restoreOutput = new FileStream(
+                            destinationPath,
+                            FileMode.OpenOrCreate,
+                            FileAccess.Write,
+                            FileShare.None,
+                            VaultPersistCopyBufferSize,
+                            FileOptions.SequentialScan);
                         restoreOutput.SetLength(0);
-                        backupInput.CopyTo(restoreOutput);
+                        backupInput.CopyTo(restoreOutput, VaultPersistCopyBufferSize);
                         restoreOutput.Flush(flushToDisk: true);
                     }
                     catch
