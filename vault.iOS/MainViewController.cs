@@ -1595,7 +1595,7 @@ namespace vault.iOS
                 field.AutocorrectionType = UITextAutocorrectionType.No;
                 field.SpellCheckingType = UITextSpellCheckingType.No;
                 field.AutocapitalizationType = UITextAutocapitalizationType.None;
-                field.TextContentType = null;
+                field.TextContentType = UITextContentType.OneTimeCode;
             });
             alert.AddTextField(field =>
             {
@@ -1856,11 +1856,11 @@ namespace vault.iOS
                 field.AutocorrectionType = UITextAutocorrectionType.No;
                 field.SpellCheckingType = UITextSpellCheckingType.No;
                 field.AutocapitalizationType = UITextAutocapitalizationType.None;
-                field.TextContentType = null;
+                field.TextContentType = UITextContentType.OneTimeCode;
             });
 
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-            alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, _ =>
+            alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, __ =>
             {
                 string rawName = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
                 string name = NormalizeFolderName(rawName);
