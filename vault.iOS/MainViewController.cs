@@ -31,6 +31,8 @@ namespace vault.iOS
         private const int ThumbnailDefaultPixelSize = 480;
         private const int ThumbnailMaxPixelSize = 640;
         private const int ThumbnailDecodeConcurrency = 4;
+        private const long LegacyAutoUpgradeThresholdBytes = 180L * 1024 * 1024;
+        private const long PersistSafetyMarginBytes = 96L * 1024 * 1024;
 
         private enum BrowserViewMode
         {
@@ -1458,6 +1460,22 @@ namespace vault.iOS
             return path.Trim().Trim('/');
         }
 
+        private static string NormalizeFolderName(string name)
+        {
+            string trimmed = name?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(trimmed))
+                return string.Empty;
+            if (trimmed.Contains('/') || trimmed.Contains('\\'))
+                return string.Empty;
+            if (string.Equals(trimmed, ".", StringComparison.Ordinal) ||
+                string.Equals(trimmed, "..", StringComparison.Ordinal))
+            {
+                return string.Empty;
+            }
+
+            return trimmed;
+        }
+
         private void ReloadVisibleData()
         {
             _tableView?.ReloadData();
@@ -1574,16 +1592,26 @@ namespace vault.iOS
                 field.Placeholder = "Nome vault";
                 field.Text = "vault_ios";
                 field.ClearButtonMode = UITextFieldViewMode.WhileEditing;
+                field.AutocorrectionType = UITextAutocorrectionType.No;
+                field.SpellCheckingType = UITextSpellCheckingType.No;
+                field.AutocapitalizationType = UITextAutocapitalizationType.None;
+                field.TextContentType = null;
             });
             alert.AddTextField(field =>
             {
                 field.Placeholder = "Password";
                 field.SecureTextEntry = true;
+                field.AutocorrectionType = UITextAutocorrectionType.No;
+                field.SpellCheckingType = UITextSpellCheckingType.No;
+                field.TextContentType = UITextContentType.OneTimeCode;
             });
             alert.AddTextField(field =>
             {
                 field.Placeholder = "Conferma password";
                 field.SecureTextEntry = true;
+                field.AutocorrectionType = UITextAutocorrectionType.No;
+                field.SpellCheckingType = UITextSpellCheckingType.No;
+                field.TextContentType = UITextContentType.OneTimeCode;
             });
 
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
@@ -1605,37 +1633,119 @@ namespace vault.iOS
                     return;
                 }
 
-                string vaultPath = BuildNewVaultPath(requestedName);
-                _ = CreateVaultFromIosAsync(vaultPath, password, format);
+                _ = CreateVaultFromIosAsync(requestedName, password, format);
             }));
 
             PresentViewController(alert, true, null);
         }
 
-        private async Task CreateVaultFromIosAsync(string vaultPath, string password, VaultStorageFormat format)
+        private async Task CreateVaultFromIosAsync(string requestedName, string password, VaultStorageFormat format)
         {
+            string tempVaultPath = BuildCreateVaultTempPath(requestedName);
             await RunBusyWithProgressAsync("Creazione vault...", async progress =>
             {
                 await Task.Run(() =>
                 {
                     var manager = new VaultManager();
-                    manager.CreateVault(vaultPath, password, format, progress);
+                    manager.CreateVault(tempVaultPath, password, format, progress);
+                });
+            });
+
+            if (!File.Exists(tempVaultPath))
+            {
+                ShowError("File vault creato non trovato.");
+                return;
+            }
+
+            BeginInvokeOnMainThread(() => PromptVaultSaveDestination(tempVaultPath, requestedName, password));
+        }
+
+        private void PromptVaultSaveDestination(string tempVaultPath, string requestedName, string password)
+        {
+            UIAlertController sheet = UIAlertController.Create(
+                "Dove salvare il vault?",
+                "Scegli la posizione di salvataggio",
+                UIAlertControllerStyle.ActionSheet);
+
+            sheet.AddAction(UIAlertAction.Create("Scegli in File/iCloud", UIAlertActionStyle.Default, _ =>
+            {
+                PresentVaultExportPicker(tempVaultPath, password);
+            }));
+
+            sheet.AddAction(UIAlertAction.Create("Dentro l'app (Documents/Vaults)", UIAlertActionStyle.Default, _ =>
+            {
+                SaveVaultInsideAppAndOpen(tempVaultPath, requestedName, password);
+            }));
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, _ =>
+            {
+                TryDeletePath(tempVaultPath);
+            }));
+
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private void SaveVaultInsideAppAndOpen(string tempVaultPath, string requestedName, string password)
+        {
+            string finalPath;
+            try
+            {
+                finalPath = BuildNewVaultPath(requestedName);
+                File.Move(tempVaultPath, finalPath);
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex.Message);
+                TryDeletePath(tempVaultPath);
+                return;
+            }
+
+            _ = OpenVaultAsync(NSUrl.FromFilename(finalPath), password);
+        }
+
+        private void PresentVaultExportPicker(string tempVaultPath, string password)
+        {
+            NSUrl sourceUrl = NSUrl.FromFilename(tempVaultPath);
+#pragma warning disable CA1422
+            var picker = new UIDocumentPickerViewController(new[] { sourceUrl }, UIDocumentPickerMode.ExportToService);
+#pragma warning restore CA1422
+
+            _pickerDelegate = new PickerDelegate(
+                onPicked: urls =>
+                {
+                    NSUrl? exportedUrl = urls?.FirstOrDefault();
+                    TryDeletePath(tempVaultPath);
+                    if (exportedUrl == null)
+                    {
+                        ShowError("Nessuna destinazione selezionata.");
+                        return;
+                    }
+
+                    _ = OpenVaultAsync(exportedUrl, password);
+                },
+                onCancelled: () =>
+                {
+                    TryDeletePath(tempVaultPath);
                 });
 
-                NSUrl vaultUrl = NSUrl.FromFilename(vaultPath);
-                VaultPortableReader reader = await Task.Run(() => OpenVaultReader(vaultUrl, password));
+            picker.Delegate = _pickerDelegate;
+            PresentViewController(picker, true, null);
+        }
 
-                _session?.Dispose();
-                _session = reader;
-                _vaultUrl = vaultUrl;
-                _sessionPassword = password;
-                _currentFolder = string.Empty;
-                _isSelectionMode = false;
-                _selectedItemIds.Clear();
-                ClearThumbnailCache();
-                ClearThumbnailDiskCache();
-                ReloadFolderItems();
-            });
+        private static string BuildCreateVaultTempPath(string requestedName)
+        {
+            string runtimeRoot = GetRuntimeTempDirectoryPath();
+            Directory.CreateDirectory(runtimeRoot);
+
+            string fileName = NormalizeVaultFileName(requestedName);
+            string candidatePath = Path.Combine(runtimeRoot, fileName);
+            if (!File.Exists(candidatePath))
+                return candidatePath;
+
+            string baseName = Path.GetFileNameWithoutExtension(fileName);
+            string extension = Path.GetExtension(fileName);
+            return Path.Combine(runtimeRoot, $"{baseName}_{Guid.NewGuid():N}{extension}");
         }
 
         private static string BuildNewVaultPath(string requestedName)
@@ -1713,6 +1823,11 @@ namespace vault.iOS
                 _ = PickFilesToAddAsync();
             }));
 
+            sheet.AddAction(UIAlertAction.Create("Cartella (qui)", UIAlertActionStyle.Default, __ =>
+            {
+                PromptCreateFolderInCurrentPath();
+            }));
+
             sheet.AddAction(UIAlertAction.Create("Galleria foto/video", UIAlertActionStyle.Default, __ =>
             {
                 _ = PickGalleryMediaToAddAsync();
@@ -1723,6 +1838,50 @@ namespace vault.iOS
             PresentViewController(sheet, true, null);
 
             await Task.CompletedTask;
+        }
+
+        private void PromptCreateFolderInCurrentPath()
+        {
+            if (_session == null)
+            {
+                ShowError("Apri prima un vault.");
+                return;
+            }
+
+            UIAlertController alert = UIAlertController.Create("Nuova cartella", null, UIAlertControllerStyle.Alert);
+            alert.AddTextField(field =>
+            {
+                field.Placeholder = "Nome cartella";
+                field.ClearButtonMode = UITextFieldViewMode.WhileEditing;
+                field.AutocorrectionType = UITextAutocorrectionType.No;
+                field.SpellCheckingType = UITextSpellCheckingType.No;
+                field.AutocapitalizationType = UITextAutocapitalizationType.None;
+                field.TextContentType = null;
+            });
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, _ =>
+            {
+                string rawName = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
+                string name = NormalizeFolderName(rawName);
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    ShowError("Inserisci un nome cartella valido.");
+                    return;
+                }
+
+                _ = RunBusyAsync("Creazione cartella...", async () =>
+                {
+                    if (_session == null)
+                        return;
+
+                    _session.CreateFolder(name, _currentFolder);
+                    await PersistVaultAsync();
+                    ReloadFolderItems();
+                });
+            }));
+
+            PresentViewController(alert, true, null);
         }
 
         private async Task PickGalleryMediaToAddAsync()
@@ -1776,6 +1935,9 @@ namespace vault.iOS
                 field.Placeholder = "Password";
                 field.SecureTextEntry = true;
                 field.ReturnKeyType = UIReturnKeyType.Done;
+                field.AutocorrectionType = UITextAutocorrectionType.No;
+                field.SpellCheckingType = UITextSpellCheckingType.No;
+                field.TextContentType = UITextContentType.OneTimeCode;
             });
 
             prompt.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
@@ -2068,7 +2230,119 @@ namespace vault.iOS
 
             VaultPortableReader session = _session;
             NSUrl vaultUrl = _vaultUrl;
+            ClearThumbnailCache();
+            PrepareSessionForPersist(session);
+            EnsureEnoughFreeSpaceForPersist(session, vaultUrl);
             await Task.Run(() => PersistVaultToUrl(vaultUrl, session, progress));
+        }
+
+        private static void PrepareSessionForPersist(VaultPortableReader session)
+        {
+            if (session.StorageFormat != VaultStorageFormat.Legacy)
+                return;
+
+            long payloadBytes = EstimateSessionPayloadBytes(session);
+            if (payloadBytes < LegacyAutoUpgradeThresholdBytes)
+                return;
+
+            session.ChangeStorageFormat(VaultStorageFormat.Extended);
+        }
+
+        private static void EnsureEnoughFreeSpaceForPersist(VaultPortableReader session, NSUrl vaultUrl)
+        {
+            long availableBytes = TryGetAvailableRuntimeBytes();
+            if (availableBytes <= 0)
+                return;
+
+            long estimatedOutputBytes = EstimatePersistOutputBytes(session, vaultUrl);
+            long requiredBytes = checked(estimatedOutputBytes + PersistSafetyMarginBytes);
+            if (availableBytes >= requiredBytes)
+                return;
+
+            long missingBytes = requiredBytes - availableBytes;
+            throw new IOException(
+                $"Spazio insufficiente per completare il salvataggio del vault. " +
+                $"Disponibile {FormatByteSize(availableBytes)}, richiesto circa {FormatByteSize(requiredBytes)} " +
+                $"(mancano {FormatByteSize(missingBytes)}).");
+        }
+
+        private static long EstimatePersistOutputBytes(VaultPortableReader session, NSUrl vaultUrl)
+        {
+            long sessionBytes = EstimateSessionPayloadBytes(session);
+            long overheadBytes = sessionBytes > 0
+                ? Math.Max(8L * 1024 * 1024, sessionBytes / 25L)
+                : 8L * 1024 * 1024;
+            long estimatedBytes = checked(sessionBytes + overheadBytes);
+
+            long fileSizeBytes = TryGetVaultFileSize(vaultUrl);
+            if (fileSizeBytes > estimatedBytes)
+                estimatedBytes = fileSizeBytes;
+
+            return estimatedBytes;
+        }
+
+        private static long EstimateSessionPayloadBytes(VaultPortableReader session)
+        {
+            long total = 0;
+            foreach (VaultFileItem item in session.Files)
+            {
+                if (item.IsFolder)
+                    continue;
+
+                long size = item.ContentLength;
+                if (size <= 0)
+                    continue;
+
+                total = checked(total + size);
+            }
+
+            return total;
+        }
+
+        private static long TryGetVaultFileSize(NSUrl vaultUrl)
+        {
+            try
+            {
+                string? path = vaultUrl.Path;
+                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                    return 0;
+
+                return new FileInfo(path).Length;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static long TryGetAvailableRuntimeBytes()
+        {
+            try
+            {
+                string tempRoot = Path.GetPathRoot(Path.GetTempPath()) ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(tempRoot))
+                    return -1;
+
+                return new DriveInfo(tempRoot).AvailableFreeSpace;
+            }
+            catch
+            {
+                return -1;
+            }
+        }
+
+        private static string FormatByteSize(long bytes)
+        {
+            string[] units = { "B", "KB", "MB", "GB", "TB" };
+            double value = Math.Max(0d, bytes);
+            int unitIndex = 0;
+            while (value >= 1024d && unitIndex < units.Length - 1)
+            {
+                value /= 1024d;
+                unitIndex++;
+            }
+
+            return $"{value:0.#} {units[unitIndex]}";
         }
 
         private async Task RunBusyAsync(string message, Func<Task> action)
@@ -3673,10 +3947,12 @@ namespace vault.iOS
         private sealed class PickerDelegate : UIDocumentPickerDelegate
         {
             private readonly Action<NSUrl[]> _onPicked;
+            private readonly Action? _onCancelled;
 
-            public PickerDelegate(Action<NSUrl[]> onPicked)
+            public PickerDelegate(Action<NSUrl[]> onPicked, Action? onCancelled = null)
             {
-                _onPicked = onPicked;
+                _onPicked = onPicked ?? throw new ArgumentNullException(nameof(onPicked));
+                _onCancelled = onCancelled;
             }
 
             public override void DidPickDocument(UIDocumentPickerViewController controller, NSUrl url)
@@ -3691,7 +3967,13 @@ namespace vault.iOS
 
             public override void WasCancelled(UIDocumentPickerViewController controller)
             {
-                controller.DismissViewController(true, null);
+                controller.DismissViewController(true, () =>
+                {
+                    if (_onCancelled == null)
+                        return;
+
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(_onCancelled);
+                });
             }
 
             private void NotifyPicked(UIDocumentPickerViewController controller, NSUrl[]? urls)
