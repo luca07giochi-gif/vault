@@ -28,6 +28,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="SharpCompress" Version="0.44.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <BundleResource Include="Resources\AppIcon\*.png">
       <LogicalName>%(Filename)%(Extension)</LogicalName>
     </BundleResource>

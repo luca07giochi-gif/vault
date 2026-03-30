@@ -143,6 +143,16 @@ namespace vault.Core.Domain
             return AddFileFromStreamInternal(fileName, source, info.Length, targetFolderPath);
         }
 
+        public VaultFileItem AddFileFromStream(string fileName, Stream source, long contentLength, string? targetFolderPath)
+        {
+            ThrowIfDisposed();
+
+            if (string.IsNullOrWhiteSpace(fileName))
+                throw new ArgumentException(VaultText.T("core.error.invalidName"), nameof(fileName));
+
+            return AddFileFromStreamInternal(fileName, source, contentLength, targetFolderPath);
+        }
+
         public void RenameItem(Guid itemId, string newName)
         {
             ThrowIfDisposed();

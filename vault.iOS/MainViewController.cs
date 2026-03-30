@@ -12,6 +12,7 @@ using Foundation;
 using ImageIO;
 using Photos;
 using PhotosUI;
+using SharpCompress.Archives;
 using UIKit;
 using vault.Core.Domain;
 
@@ -2121,6 +2122,13 @@ namespace vault.iOS
             {
                 _ = OpenFileAsync(item);
             }));
+            if (IsArchiveExtractionCandidate(item.FileName))
+            {
+                sheet.AddAction(UIAlertAction.Create("Estrai in cartella", UIAlertActionStyle.Default, __ =>
+                {
+                    _ = ExtractArchiveAsync(item);
+                }));
+            }
             sheet.AddAction(UIAlertAction.Create("Esporta", UIAlertActionStyle.Default, __ =>
             {
                 _ = ExportFileAsync(item);
@@ -2245,6 +2253,59 @@ namespace vault.iOS
             {
                 (string localPath, bool deleteOnClose) = await Task.Run(() => ResolvePlaybackPath(_session, item));
                 PresentInAppVideoPlayer(localPath, item.FileName, deleteOnClose);
+            });
+        }
+
+        private async Task ExtractArchiveAsync(VaultFileItem item)
+        {
+            if (_session == null || item.IsFolder || !IsArchiveExtractionCandidate(item.FileName))
+                return;
+
+            VaultPortableReader session = _session;
+            string sourcePath = string.Empty;
+            bool deleteSourcePath = false;
+            Guid rootFolderId = Guid.Empty;
+
+            await RunBusyWithProgressAsync("Estrazione archivio...", async progress =>
+            {
+                try
+                {
+                    ReportProgress(progress, 4d);
+                    (sourcePath, deleteSourcePath) = await Task.Run(() => ResolveReadableContentPath(session, item));
+
+                    ReportProgress(progress, 10d);
+                    VaultFileItem extractionRoot = await Task.Run(() =>
+                        session.CreateFolder(GetArchiveExtractionFolderName(item.FileName), item.ParentPath));
+                    rootFolderId = extractionRoot.Id;
+
+                    await Task.Run(() => ExtractArchiveIntoFolder(session, sourcePath, extractionRoot.FullPath, progress));
+
+                    ReportProgress(progress, 88d);
+                    await PersistVaultAsync(CreateScaledProgress(progress, 88d, 100d));
+                    EnsureCurrentFolderStillExists();
+                    ReloadFolderItems();
+                }
+                catch
+                {
+                    if (rootFolderId != Guid.Empty)
+                    {
+                        try
+                        {
+                            session.DeleteItems(new[] { rootFolderId });
+                        }
+                        catch
+                        {
+                            // Best effort rollback.
+                        }
+                    }
+
+                    throw;
+                }
+                finally
+                {
+                    if (deleteSourcePath && !string.IsNullOrWhiteSpace(sourcePath))
+                        DeleteTemporaryFile(sourcePath);
+                }
             });
         }
 
@@ -2906,6 +2967,18 @@ namespace vault.iOS
         }
 
         private (string path, bool deleteOnClose) ResolvePlaybackPath(VaultPortableReader session, VaultFileItem item)
+        {
+            if (session.TryGetLocalContentPath(item.Id, out string localPath) &&
+                !string.IsNullOrWhiteSpace(localPath) &&
+                File.Exists(localPath))
+            {
+                return (localPath, false);
+            }
+
+            return (WriteTemporaryFileFromVault(session, item), true);
+        }
+
+        private (string path, bool deleteOnClose) ResolveReadableContentPath(VaultPortableReader session, VaultFileItem item)
         {
             if (session.TryGetLocalContentPath(item.Id, out string localPath) &&
                 !string.IsNullOrWhiteSpace(localPath) &&
@@ -3765,6 +3838,45 @@ namespace vault.iOS
             return ext is ".mov" or ".mp4" or ".m4v";
         }
 
+        private static bool IsArchiveExtractionCandidate(string? fileName)
+        {
+            string normalized = (fileName ?? string.Empty).ToLowerInvariant();
+            return normalized.EndsWith(".zip", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".rar", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".7z", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".tar", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".tar.gz", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".tgz", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".tar.bz2", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".tbz2", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".tar.xz", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".txz", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".gz", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".bz2", StringComparison.Ordinal) ||
+                   normalized.EndsWith(".xz", StringComparison.Ordinal);
+        }
+
+        private static string GetArchiveExtractionFolderName(string? fileName)
+        {
+            string safeName = string.IsNullOrWhiteSpace(fileName) ? "archivio" : fileName.Trim();
+            string normalized = safeName.ToLowerInvariant();
+            string[] doubleExtensions =
+            {
+                ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2", ".txz"
+            };
+
+            foreach (string ext in doubleExtensions)
+            {
+                if (!normalized.EndsWith(ext, StringComparison.Ordinal))
+                    continue;
+
+                return safeName[..^ext.Length];
+            }
+
+            string single = Path.GetFileNameWithoutExtension(safeName);
+            return string.IsNullOrWhiteSpace(single) ? "archivio" : single;
+        }
+
         private static string GetEditableOutputName(string? originalName, bool appendModifiedSuffix)
         {
             string safeOriginal = string.IsNullOrWhiteSpace(originalName) ? "immagine.jpg" : originalName;
@@ -3940,6 +4052,191 @@ namespace vault.iOS
                 return image.AsPNG();
 
             return image.AsJPEG((nfloat)0.92f);
+        }
+
+        private static void ExtractArchiveIntoFolder(
+            VaultPortableReader session,
+            string archivePath,
+            string rootFolderPath,
+            IProgress<double>? progress)
+        {
+            if (session == null)
+                throw new ArgumentNullException(nameof(session));
+            if (string.IsNullOrWhiteSpace(archivePath) || !File.Exists(archivePath))
+                throw new FileNotFoundException("Archivio non trovato.", archivePath);
+            if (string.IsNullOrWhiteSpace(rootFolderPath))
+                throw new ArgumentException("Cartella destinazione non valida.", nameof(rootFolderPath));
+
+            using IArchive archive = ArchiveFactory.Open(archivePath);
+            var entries = archive.Entries
+                .Where(entry => !string.IsNullOrWhiteSpace(entry.Key))
+                .ToList();
+
+            if (entries.Count == 0)
+                return;
+
+            var folderMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [string.Empty] = rootFolderPath
+            };
+
+            int processed = 0;
+            foreach (var entry in entries)
+            {
+                string normalizedPath = NormalizeArchiveEntryPath((string?)entry.Key);
+                if (string.IsNullOrWhiteSpace(normalizedPath) || ShouldSkipArchiveEntry(normalizedPath))
+                {
+                    processed++;
+                    ReportArchiveExtractionProgress(progress, processed, entries.Count);
+                    continue;
+                }
+
+                if (entry.IsDirectory)
+                {
+                    EnsureArchiveFolderPath(session, rootFolderPath, normalizedPath, folderMap);
+                    processed++;
+                    ReportArchiveExtractionProgress(progress, processed, entries.Count);
+                    continue;
+                }
+
+                string parentRelative = GetParentPath(normalizedPath);
+                string targetFolderPath = EnsureArchiveFolderPath(session, rootFolderPath, parentRelative, folderMap);
+                string fileName = GetPathNodeName(normalizedPath);
+                if (string.IsNullOrWhiteSpace(fileName))
+                {
+                    processed++;
+                    ReportArchiveExtractionProgress(progress, processed, entries.Count);
+                    continue;
+                }
+
+                using Stream entryStream = entry.OpenEntryStream();
+                long entrySize = entry.Size;
+                if (entrySize >= 0)
+                {
+                    session.AddFileFromStream(fileName, entryStream, entrySize, targetFolderPath);
+                }
+                else
+                {
+                    string tempPath = CreateTemporaryPath(fileName);
+                    try
+                    {
+                        using (var output = new FileStream(
+                            tempPath,
+                            FileMode.Create,
+                            FileAccess.Write,
+                            FileShare.None,
+                            VaultPersistCopyBufferSize,
+                            FileOptions.SequentialScan))
+                        {
+                            entryStream.CopyTo(output, VaultPersistCopyBufferSize);
+                        }
+
+                        VaultFileItem added = session.AddFileFromPath(tempPath, targetFolderPath);
+                        session.RenameItem(added.Id, fileName);
+                    }
+                    finally
+                    {
+                        TryDeletePath(tempPath);
+                    }
+                }
+
+                processed++;
+                ReportArchiveExtractionProgress(progress, processed, entries.Count);
+            }
+        }
+
+        private static void ReportArchiveExtractionProgress(IProgress<double>? progress, int processedEntries, int totalEntries)
+        {
+            if (totalEntries <= 0)
+            {
+                ReportProgress(progress, 84d);
+                return;
+            }
+
+            double percent = 12d + (72d * processedEntries / totalEntries);
+            ReportProgress(progress, percent);
+        }
+
+        private static string EnsureArchiveFolderPath(
+            VaultPortableReader session,
+            string rootFolderPath,
+            string? relativeFolderPath,
+            IDictionary<string, string> folderMap)
+        {
+            string normalizedRelative = NormalizeArchiveEntryPath(relativeFolderPath);
+            if (string.IsNullOrWhiteSpace(normalizedRelative))
+                return rootFolderPath;
+
+            if (folderMap.TryGetValue(normalizedRelative, out string? mapped))
+                return mapped;
+
+            string currentRelative = string.Empty;
+            string currentActual = rootFolderPath;
+            foreach (string segment in normalizedRelative.Split('/', StringSplitOptions.RemoveEmptyEntries))
+            {
+                currentRelative = string.IsNullOrWhiteSpace(currentRelative)
+                    ? segment
+                    : $"{currentRelative}/{segment}";
+
+                if (folderMap.TryGetValue(currentRelative, out string? existing))
+                {
+                    currentActual = existing;
+                    continue;
+                }
+
+                VaultFileItem created = session.CreateFolder(segment, currentActual);
+                currentActual = created.FullPath;
+                folderMap[currentRelative] = currentActual;
+            }
+
+            return currentActual;
+        }
+
+        private static string NormalizeArchiveEntryPath(string? rawPath)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath))
+                return string.Empty;
+
+            string normalized = rawPath.Replace('\\', '/').Trim().Trim('/');
+            while (normalized.StartsWith("./", StringComparison.Ordinal))
+                normalized = normalized[2..];
+
+            if (string.IsNullOrWhiteSpace(normalized))
+                return string.Empty;
+
+            string[] segments = normalized
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Where(segment => !string.Equals(segment, ".", StringComparison.Ordinal))
+                .ToArray();
+
+            if (segments.Any(segment => string.Equals(segment, "..", StringComparison.Ordinal)))
+                throw new InvalidOperationException("Archivio non valido: percorso interno non sicuro.");
+
+            return string.Join("/", segments);
+        }
+
+        private static bool ShouldSkipArchiveEntry(string normalizedPath)
+        {
+            if (string.IsNullOrWhiteSpace(normalizedPath))
+                return true;
+
+            if (normalizedPath.Equals("__MACOSX", StringComparison.OrdinalIgnoreCase) ||
+                normalizedPath.StartsWith("__MACOSX/", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            string nodeName = GetPathNodeName(normalizedPath);
+            return nodeName.StartsWith("._", StringComparison.Ordinal);
+        }
+
+        private static string GetPathNodeName(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return string.Empty;
+
+            int idx = path.LastIndexOf('/');
+            return idx < 0 ? path : path[(idx + 1)..];
         }
 
         private static void TryRollbackRotateOperation(
