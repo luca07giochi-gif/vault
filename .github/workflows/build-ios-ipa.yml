@@ -44,6 +44,8 @@ jobs:
         run: dotnet workload install ios --skip-manifest-update
 
       - name: Publish iOS IPA (unsigned)
+        id: publish
+        continue-on-error: true
         run: |
           dotnet publish vault.iOS/vault.iOS.csproj \
             -f net8.0-ios16.4 \
@@ -73,7 +75,21 @@ jobs:
           path: publish-ios.log
           if-no-files-found: ignore
 
+      - name: Summarize publish errors
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f publish-ios.log ]; then
+            echo "publish-ios.log non trovato."
+            exit 0
+          fi
+
+          echo "Esito step publish: ${{ steps.publish.outcome }}"
+          echo "Prime righe contenenti error/warning:"
+          grep -Ein "error|warning" publish-ios.log | tail -n 200 || true
+
       - name: Locate IPA
+        if: always()
         id: locate
         shell: bash
         run: |
@@ -87,6 +103,7 @@ jobs:
           echo "IPA: $IPA_PATH"
 
       - name: Inspect app bundle for extensions
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -119,6 +136,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$APPEX_PATH/Info.plist" || true
 
       - name: Inspect IPA contents for extensions
+        if: always() && steps.locate.outputs.ipa_path != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -155,7 +173,17 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$APPEX_PATH/Info.plist" || true
           rm -rf "$TMP_DIR"
 
+      - name: Fail if publish did not succeed
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.publish.outcome }}" != "success" ]; then
+            echo "Il publish iOS non e riuscito. Controlla lo step 'Summarize publish errors' e gli artifact di log."
+            exit 1
+          fi
+
       - name: Upload IPA artifact
+        if: success()
         uses: actions/upload-artifact@v6
         with:
           name: vault-ios-ipa
