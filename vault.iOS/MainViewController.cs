@@ -1254,7 +1254,7 @@ namespace vault.iOS
             if (indexPath == null || indexPath.Row < 0 || indexPath.Row >= _visibleItems.Count)
                 return;
 
-            StartSelectionModeWithItem(_visibleItems[indexPath.Row].Id);
+            HandleItemLongPress(indexPath.Row);
         }
 
         private void HandleCollectionLongPress(UILongPressGestureRecognizer gesture)
@@ -1267,7 +1267,7 @@ namespace vault.iOS
             if (indexPath == null || indexPath.Row < 0 || indexPath.Row >= _visibleItems.Count)
                 return;
 
-            StartSelectionModeWithItem(_visibleItems[indexPath.Row].Id);
+            HandleItemLongPress(indexPath.Row);
         }
 
         private void StartSelectionModeWithItem(Guid itemId)
@@ -2097,12 +2097,11 @@ namespace vault.iOS
             ReloadFolderItems();
         }
 
-        private async Task OpenItemActionsAsync(VaultFileItem item)
+        private async Task OpenItemActionsAsync(VaultFileItem item, bool includeSelectAction = false)
         {
             if (item.IsFolder)
             {
-                _currentFolder = item.FullPath;
-                ReloadFolderItems();
+                StartSelectionModeWithItem(item.Id);
                 return;
             }
 
@@ -2111,6 +2110,13 @@ namespace vault.iOS
                 $"{item.SizeLabel} - {item.AddedAtLabel}",
                 UIAlertControllerStyle.ActionSheet);
 
+            if (includeSelectAction)
+            {
+                sheet.AddAction(UIAlertAction.Create("Seleziona", UIAlertActionStyle.Default, __ =>
+                {
+                    StartSelectionModeWithItem(item.Id);
+                }));
+            }
             sheet.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, __ =>
             {
                 _ = OpenFileAsync(item);
@@ -2121,17 +2127,6 @@ namespace vault.iOS
             }));
             sheet.AddAction(UIAlertAction.Create("Rinomina", UIAlertActionStyle.Default, __ => PromptRename(item)));
             sheet.AddAction(UIAlertAction.Create("Sposta", UIAlertActionStyle.Default, __ => PromptMove(item)));
-            if (IsImagePreviewCandidate(item.FileName))
-            {
-                sheet.AddAction(UIAlertAction.Create("Ruota 90 gradi destra", UIAlertActionStyle.Default, __ =>
-                {
-                    _ = RotateImagePermanentAsync(item, clockwise: true);
-                }));
-                sheet.AddAction(UIAlertAction.Create("Ruota 90 gradi sinistra", UIAlertActionStyle.Default, __ =>
-                {
-                    _ = RotateImagePermanentAsync(item, clockwise: false);
-                }));
-            }
             sheet.AddAction(UIAlertAction.Create("Elimina", UIAlertActionStyle.Destructive, __ => PromptDelete(item)));
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
 
@@ -2215,6 +2210,13 @@ namespace vault.iOS
             if (_session == null)
                 return;
 
+            if (item.IsFolder)
+            {
+                _currentFolder = item.FullPath;
+                ReloadFolderItems();
+                return;
+            }
+
             if (IsVideoPreviewCandidate(item.FileName))
             {
                 await OpenVideoInAppAsync(item);
@@ -2241,8 +2243,8 @@ namespace vault.iOS
 
             await RunBusyAsync("Preparazione video...", async () =>
             {
-                string tempPath = await Task.Run(() => WriteTemporaryFileFromVault(_session, item));
-                PresentInAppVideoPlayer(tempPath, item.FileName);
+                (string localPath, bool deleteOnClose) = await Task.Run(() => ResolvePlaybackPath(_session, item));
+                PresentInAppVideoPlayer(localPath, item.FileName, deleteOnClose);
             });
         }
 
@@ -2261,7 +2263,7 @@ namespace vault.iOS
             if (startIndex < 0)
                 return false;
 
-            var viewer = new ImageGalleryViewController(_session, images, startIndex);
+            var viewer = new ImageGalleryViewController(this, _session, images, startIndex);
             var nav = new UINavigationController(viewer)
             {
                 ModalPresentationStyle = UIModalPresentationStyle.FullScreen
@@ -2270,7 +2272,105 @@ namespace vault.iOS
             return true;
         }
 
-        private void PresentInAppVideoPlayer(string localPath, string fileName)
+        private async Task<VaultFileItem> SaveEditedImageAsync(
+            VaultFileItem sourceItem,
+            UIImage editedImage,
+            bool overwrite,
+            IProgress<double>? progress = null)
+        {
+            if (_session == null)
+                throw new InvalidOperationException("Vault non aperto.");
+            if (sourceItem.IsFolder)
+                throw new InvalidOperationException("Elemento non valido.");
+
+            VaultPortableReader session = _session;
+            string sourceName = sourceItem.FileName;
+            string outputName = overwrite
+                ? GetEditableOutputName(sourceName, appendModifiedSuffix: false)
+                : GetEditableOutputName(sourceName, appendModifiedSuffix: true);
+
+            string editedTempPath = CreateTemporaryPath(outputName);
+            string originalBackupPath = overwrite ? CreateTemporaryPath(sourceName) : string.Empty;
+            Guid addedId = Guid.Empty;
+
+            try
+            {
+                if (overwrite)
+                {
+                    ReportProgress(progress, 6d);
+                    await Task.Run(() =>
+                    {
+                        using var output = new FileStream(
+                            originalBackupPath,
+                            FileMode.Create,
+                            FileAccess.Write,
+                            FileShare.None,
+                            VaultPersistCopyBufferSize,
+                            FileOptions.SequentialScan);
+                        session.CopyFileContentToStream(sourceItem.Id, output);
+                    });
+                }
+
+                ReportProgress(progress, overwrite ? 22d : 10d);
+                await Task.Run(() => WriteImageToPath(editedImage, editedTempPath, outputName));
+
+                ReportProgress(progress, overwrite ? 44d : 32d);
+                VaultFileItem added = await Task.Run(() => session.AddFileFromPath(editedTempPath, sourceItem.ParentPath));
+                addedId = added.Id;
+                session.RenameItem(addedId, outputName);
+
+                if (overwrite)
+                {
+                    ReportProgress(progress, 60d);
+                    session.DeleteItems(new[] { sourceItem.Id });
+                    await PersistVaultAsync(CreateScaledProgress(progress, 66d, 100d));
+                }
+                else
+                {
+                    await PersistVaultAsync(CreateScaledProgress(progress, 50d, 100d));
+                }
+
+                ClearThumbnailCache();
+                ClearThumbnailDiskCache();
+                EnsureCurrentFolderStillExists();
+                ReloadFolderItems();
+
+                return session.Files.FirstOrDefault(file => file.Id == addedId) ?? added;
+            }
+            catch
+            {
+                if (overwrite)
+                {
+                    TryRollbackEditedImageOperation(
+                        session,
+                        addedId,
+                        sourceItem.Id,
+                        originalBackupPath,
+                        sourceItem.ParentPath,
+                        sourceItem.FileName);
+                }
+                else if (addedId != Guid.Empty)
+                {
+                    try
+                    {
+                        session.DeleteItems(new[] { addedId });
+                    }
+                    catch
+                    {
+                        // Best effort rollback.
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                TryDeletePath(editedTempPath);
+                TryDeletePath(originalBackupPath);
+            }
+        }
+
+        private void PresentInAppVideoPlayer(string localPath, string fileName, bool deleteOnClose)
         {
             if (string.IsNullOrWhiteSpace(localPath) || !File.Exists(localPath))
                 throw new FileNotFoundException("Video temporaneo non trovato.", localPath);
@@ -2281,7 +2381,8 @@ namespace vault.iOS
                 onClosed: () =>
                 {
                     _videoPlayerController = null;
-                    DeleteTemporaryFile(localPath);
+                    if (deleteOnClose)
+                        DeleteTemporaryFile(localPath);
                 });
 
             var nav = new UINavigationController(_videoPlayerController)
@@ -2586,7 +2687,7 @@ namespace vault.iOS
             if (string.IsNullOrWhiteSpace(targetPath))
                 return Path.GetTempPath();
 
-            string current = targetPath;
+            string? current = targetPath;
             if (File.Exists(current))
                 current = Path.GetDirectoryName(current) ?? current;
 
@@ -2802,6 +2903,18 @@ namespace vault.iOS
 
             _temporaryFiles.Add(tempPath);
             return tempPath;
+        }
+
+        private (string path, bool deleteOnClose) ResolvePlaybackPath(VaultPortableReader session, VaultFileItem item)
+        {
+            if (session.TryGetLocalContentPath(item.Id, out string localPath) &&
+                !string.IsNullOrWhiteSpace(localPath) &&
+                File.Exists(localPath))
+            {
+                return (localPath, false);
+            }
+
+            return (WriteTemporaryFileFromVault(session, item), true);
         }
 
         private void DeleteTemporaryFile(string path)
@@ -3260,7 +3373,7 @@ namespace vault.iOS
                 return;
             }
 
-            _ = OpenItemActionsAsync(item);
+            _ = OpenFileAsync(item);
         }
 
         private void HandleCollectionItemTapped(int index)
@@ -3275,7 +3388,28 @@ namespace vault.iOS
                 return;
             }
 
-            _ = OpenItemActionsAsync(item);
+            _ = OpenFileAsync(item);
+        }
+
+        private void HandleItemLongPress(int index)
+        {
+            if (index < 0 || index >= _visibleItems.Count)
+                return;
+
+            VaultFileItem item = _visibleItems[index];
+            if (_isSelectionMode)
+            {
+                ToggleSelectedItem(item.Id);
+                return;
+            }
+
+            if (item.IsFolder)
+            {
+                StartSelectionModeWithItem(item.Id);
+                return;
+            }
+
+            _ = OpenItemActionsAsync(item, includeSelectAction: true);
         }
 
         private UIImage? GetOrQueueThumbnail(VaultFileItem item)
@@ -3602,6 +3736,23 @@ namespace vault.iOS
             return rendered;
         }
 
+        private static UIImage? LoadFullResolutionImage(string sourcePath)
+        {
+            if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+                return null;
+
+            using NSData? data = NSData.FromFile(sourcePath);
+            UIImage? baseImage = data != null ? UIImage.LoadFromData(data) : UIImage.FromFile(sourcePath);
+            if (baseImage == null)
+                return null;
+
+            UIImage rendered = baseImage.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+            if (!ReferenceEquals(rendered, baseImage))
+                baseImage.Dispose();
+
+            return rendered;
+        }
+
         private static bool IsImagePreviewCandidate(string? fileName)
         {
             string ext = (Path.GetExtension(fileName ?? string.Empty) ?? string.Empty).ToLowerInvariant();
@@ -3614,17 +3765,59 @@ namespace vault.iOS
             return ext is ".mov" or ".mp4" or ".m4v";
         }
 
-        private static string GetRotatedOutputName(string originalName)
+        private static string GetEditableOutputName(string? originalName, bool appendModifiedSuffix)
         {
-            string ext = (Path.GetExtension(originalName ?? string.Empty) ?? string.Empty).ToLowerInvariant();
-            if (ext is ".jpg" or ".jpeg" or ".png")
-                return originalName;
+            string safeOriginal = string.IsNullOrWhiteSpace(originalName) ? "immagine.jpg" : originalName;
+            string baseName = Path.GetFileNameWithoutExtension(safeOriginal);
+            if (string.IsNullOrWhiteSpace(baseName))
+                baseName = "immagine";
 
-            string baseName = Path.GetFileNameWithoutExtension(originalName ?? "immagine");
+            string ext = (Path.GetExtension(safeOriginal) ?? string.Empty).ToLowerInvariant();
+            if (ext is not ".jpg" and not ".jpeg" and not ".png")
+                ext = ".jpg";
+
+            return appendModifiedSuffix
+                ? $"{baseName}-modificato{ext}"
+                : $"{baseName}{ext}";
+        }
+
+        private static string GetRotatedOutputName(string? originalName)
+        {
+            string safeOriginal = string.IsNullOrWhiteSpace(originalName) ? "immagine.jpg" : originalName;
+            string ext = (Path.GetExtension(safeOriginal) ?? string.Empty).ToLowerInvariant();
+            if (ext is ".jpg" or ".jpeg" or ".png")
+                return safeOriginal;
+
+            string baseName = Path.GetFileNameWithoutExtension(safeOriginal);
             if (string.IsNullOrWhiteSpace(baseName))
                 baseName = "immagine";
 
             return $"{baseName}.jpg";
+        }
+
+        private static void WriteImageToPath(UIImage image, string destinationPath, string outputName)
+        {
+            if (image == null)
+                throw new ArgumentNullException(nameof(image));
+            if (string.IsNullOrWhiteSpace(destinationPath))
+                throw new ArgumentException("Path non valido.", nameof(destinationPath));
+
+            UIImage normalized = NormalizeImageOrientation(image);
+            bool disposeNormalized = !ReferenceEquals(normalized, image);
+
+            try
+            {
+                using NSData? data = EncodeImageForName(normalized, outputName);
+                if (data == null)
+                    throw new InvalidOperationException("Impossibile codificare l'immagine.");
+
+                File.WriteAllBytes(destinationPath, data.ToArray());
+            }
+            finally
+            {
+                if (disposeNormalized)
+                    normalized.Dispose();
+            }
         }
 
         private static void RotateImageFileOnDisk(string sourcePath, string destinationPath, string outputName, bool clockwise)
@@ -3652,32 +3845,26 @@ namespace vault.iOS
             nfloat srcWidth = normalized.Size.Width;
             nfloat srcHeight = normalized.Size.Height;
             CGSize dstSize = new CGSize(srcHeight, srcWidth);
-            nfloat scale = normalized.CurrentScale > 0f ? normalized.CurrentScale : UIScreen.MainScreen.Scale;
-            if (scale <= 0f)
-                scale = 1f;
 
-            UIGraphics.BeginImageContextWithOptions(dstSize, false, scale);
+            using var renderer = new UIGraphicsImageRenderer(dstSize);
             try
             {
-                CGContext? ctx = UIGraphics.GetCurrentContext();
-                if (ctx == null)
-                    throw new InvalidOperationException("Contesto grafico non disponibile.");
-
-                if (clockwise)
+                UIImage rendered = renderer.CreateImage(context =>
                 {
-                    ctx.TranslateCTM(dstSize.Width, 0f);
-                    ctx.RotateCTM((nfloat)(Math.PI / 2d));
-                }
-                else
-                {
-                    ctx.TranslateCTM(0f, dstSize.Height);
-                    ctx.RotateCTM((nfloat)(-Math.PI / 2d));
-                }
+                    CGContext ctx = context.CGContext;
+                    if (clockwise)
+                    {
+                        ctx.TranslateCTM(dstSize.Width, 0f);
+                        ctx.RotateCTM((nfloat)(Math.PI / 2d));
+                    }
+                    else
+                    {
+                        ctx.TranslateCTM(0f, dstSize.Height);
+                        ctx.RotateCTM((nfloat)(-Math.PI / 2d));
+                    }
 
-                normalized.Draw(new CGRect(0f, 0f, srcWidth, srcHeight));
-                UIImage? rendered = UIGraphics.GetImageFromCurrentImageContext();
-                if (rendered == null)
-                    throw new InvalidOperationException("Impossibile ottenere l'immagine ruotata.");
+                    normalized.Draw(new CGRect(0f, 0f, srcWidth, srcHeight));
+                });
 
                 UIImage result = rendered.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
                 if (!ReferenceEquals(result, rendered))
@@ -3687,7 +3874,46 @@ namespace vault.iOS
             }
             finally
             {
-                UIGraphics.EndImageContext();
+                if (disposeNormalized)
+                    normalized.Dispose();
+            }
+        }
+
+        private static UIImage CropImage(UIImage source, CGRect cropRect)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+
+            UIImage normalized = NormalizeImageOrientation(source);
+            bool disposeNormalized = !ReferenceEquals(normalized, source);
+
+            try
+            {
+                CGRect bounded = new CGRect(
+                    Math.Max(0f, cropRect.X),
+                    Math.Max(0f, cropRect.Y),
+                    Math.Max(1f, cropRect.Width),
+                    Math.Max(1f, cropRect.Height));
+
+                nfloat maxWidth = normalized.Size.Width - bounded.X;
+                nfloat maxHeight = normalized.Size.Height - bounded.Y;
+                bounded.Width = Math.Max(1f, Math.Min(bounded.Width, maxWidth));
+                bounded.Height = Math.Max(1f, Math.Min(bounded.Height, maxHeight));
+
+                using var renderer = new UIGraphicsImageRenderer(bounded.Size);
+                UIImage rendered = renderer.CreateImage(_ =>
+                {
+                    normalized.Draw(new CGRect(-bounded.X, -bounded.Y, normalized.Size.Width, normalized.Size.Height));
+                });
+
+                UIImage result = rendered.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+                if (!ReferenceEquals(result, rendered))
+                    rendered.Dispose();
+
+                return result;
+            }
+            finally
+            {
                 if (disposeNormalized)
                     normalized.Dispose();
             }
@@ -3698,21 +3924,13 @@ namespace vault.iOS
             if (image.Orientation == UIImageOrientation.Up)
                 return image;
 
-            nfloat scale = image.CurrentScale > 0f ? image.CurrentScale : UIScreen.MainScreen.Scale;
-            if (scale <= 0f)
-                scale = 1f;
-
-            UIGraphics.BeginImageContextWithOptions(image.Size, false, scale);
-            try
+            using var renderer = new UIGraphicsImageRenderer(image.Size);
+            UIImage normalized = renderer.CreateImage(_ =>
             {
                 image.Draw(new CGRect(0f, 0f, image.Size.Width, image.Size.Height));
-                UIImage? normalized = UIGraphics.GetImageFromCurrentImageContext();
-                return normalized ?? image;
-            }
-            finally
-            {
-                UIGraphics.EndImageContext();
-            }
+            });
+
+            return normalized;
         }
 
         private static NSData? EncodeImageForName(UIImage image, string fileName)
@@ -3755,6 +3973,17 @@ namespace vault.iOS
             {
                 // Best effort rollback.
             }
+        }
+
+        private static void TryRollbackEditedImageOperation(
+            VaultPortableReader session,
+            Guid addedId,
+            Guid originalId,
+            string originalBackupPath,
+            string originalParent,
+            string originalName)
+        {
+            TryRollbackRotateOperation(session, addedId, originalId, originalBackupPath, originalParent, originalName);
         }
 
         protected override void Dispose(bool disposing)
@@ -4527,14 +4756,14 @@ namespace vault.iOS
 
         private sealed class ImageGalleryViewController : UIViewController
         {
+            private readonly MainViewController _owner;
             private readonly VaultPortableReader _session;
-            private readonly IReadOnlyList<VaultFileItem> _images;
+            private readonly List<VaultFileItem> _images;
             private readonly Dictionary<Guid, string> _ownedTempPaths = new();
             private readonly object _pathLock = new();
 
             private int _currentIndex;
             private int _loadVersion;
-            private int _targetPixelSize = 1800;
             private bool _cleanedUp;
 
             private UIImage? _currentImage;
@@ -4544,10 +4773,15 @@ namespace vault.iOS
             private UILabel? _errorLabel;
             private UIActivityIndicatorView? _spinner;
 
-            public ImageGalleryViewController(VaultPortableReader session, IReadOnlyList<VaultFileItem> images, int startIndex)
+            public ImageGalleryViewController(
+                MainViewController owner,
+                VaultPortableReader session,
+                IReadOnlyList<VaultFileItem> images,
+                int startIndex)
             {
+                _owner = owner ?? throw new ArgumentNullException(nameof(owner));
                 _session = session ?? throw new ArgumentNullException(nameof(session));
-                _images = images ?? throw new ArgumentNullException(nameof(images));
+                _images = images?.ToList() ?? throw new ArgumentNullException(nameof(images));
                 _currentIndex = Math.Max(0, Math.Min(startIndex, Math.Max(0, _images.Count - 1)));
             }
 
@@ -4561,6 +4795,7 @@ namespace vault.iOS
                     "Chiudi",
                     UIBarButtonItemStyle.Done,
                     (_, _) => DismissViewController(true, null));
+                NavigationItem.RightBarButtonItem = CreateEditButton();
 
                 _imageView = new UIImageView
                 {
@@ -4634,10 +4869,6 @@ namespace vault.iOS
                 _counterLabel!.Frame = new CGRect(20f, height - 72f, width - 40f, 20f);
                 _hintLabel!.Frame = new CGRect(20f, height - 52f, width - 40f, 18f);
                 _errorLabel!.Frame = new CGRect(20f, height - 102f, width - 40f, 42f);
-
-                nfloat screenScale = UIScreen.MainScreen.Scale;
-                double basePixels = Math.Max(width, height) * screenScale * 1.8d;
-                _targetPixelSize = (int)Math.Max(1200d, Math.Min(3200d, basePixels));
             }
 
             public override void ViewDidDisappear(bool animated)
@@ -4696,15 +4927,14 @@ namespace vault.iOS
                 _spinner.StartAnimating();
 
                 VaultFileItem current = _images[_currentIndex];
-                int targetPixels = _targetPixelSize;
 
                 try
                 {
                     string sourcePath = await Task.Run(() => ResolveImagePath(current)).ConfigureAwait(false);
-                    UIImage? image = await Task.Run(() => MainViewController.CreateDownsampledThumbnail(sourcePath, targetPixels))
+                    UIImage? image = await Task.Run(() => MainViewController.LoadFullResolutionImage(sourcePath))
                         .ConfigureAwait(false);
                     if (image == null)
-                        throw new InvalidOperationException("Anteprima non disponibile.");
+                        throw new InvalidOperationException("Immagine non disponibile.");
 
                     BeginInvokeOnMainThread(() =>
                     {
@@ -4720,7 +4950,6 @@ namespace vault.iOS
                         _spinner.StopAnimating();
                         if (_errorLabel != null)
                             _errorLabel.Hidden = true;
-                        PrefetchAdjacent();
                     });
                 }
                 catch
@@ -4739,32 +4968,6 @@ namespace vault.iOS
                 }
             }
 
-            private void PrefetchAdjacent()
-            {
-                if (_images.Count <= 1)
-                    return;
-
-                int prev = _currentIndex - 1;
-                int next = _currentIndex + 1;
-
-                if (prev >= 0)
-                    _ = Task.Run(() => WarmImagePath(_images[prev]));
-                if (next < _images.Count)
-                    _ = Task.Run(() => WarmImagePath(_images[next]));
-            }
-
-            private void WarmImagePath(VaultFileItem item)
-            {
-                try
-                {
-                    ResolveImagePath(item);
-                }
-                catch
-                {
-                    // Best effort prefetch.
-                }
-            }
-
             private string ResolveImagePath(VaultFileItem item)
             {
                 if (_session.TryGetLocalContentPath(item.Id, out string localPath) && File.Exists(localPath))
@@ -4772,8 +4975,12 @@ namespace vault.iOS
 
                 lock (_pathLock)
                 {
-                    if (_ownedTempPaths.TryGetValue(item.Id, out string cached) && File.Exists(cached))
+                    if (_ownedTempPaths.TryGetValue(item.Id, out string? cached) &&
+                        !string.IsNullOrWhiteSpace(cached) &&
+                        File.Exists(cached))
+                    {
                         return cached;
+                    }
                 }
 
                 string tempPath = MainViewController.CreateTemporaryPath(item.FileName);
@@ -4816,6 +5023,725 @@ namespace vault.iOS
                 foreach (string path in tempPaths)
                     MainViewController.TryDeletePath(path);
             }
+
+            private UIBarButtonItem CreateEditButton()
+            {
+                UIImage? symbol = UIImage.GetSystemImage("square.and.pencil") ?? UIImage.GetSystemImage("pencil");
+                var item = symbol != null
+                    ? new UIBarButtonItem(symbol, UIBarButtonItemStyle.Plain, (_, _) => OpenEditorForCurrentImage())
+                    : new UIBarButtonItem("Modifica", UIBarButtonItemStyle.Plain, (_, _) => OpenEditorForCurrentImage());
+                item.TintColor = UIColor.White;
+                return item;
+            }
+
+            private void OpenEditorForCurrentImage()
+            {
+                if (_images.Count == 0 || _currentImage == null)
+                    return;
+
+                VaultFileItem current = _images[_currentIndex];
+                var editor = new ImageEditViewController(
+                    _owner,
+                    current,
+                    _currentImage,
+                    HandleEditedImageSaved);
+
+                NavigationController?.PushViewController(editor, true);
+            }
+
+            private void HandleEditedImageSaved(VaultFileItem savedItem, bool overwrite)
+            {
+                if (_images.Count == 0 || _imageView == null)
+                    return;
+
+                VaultFileItem previous = _images[_currentIndex];
+                RemoveOwnedPath(previous.Id);
+
+                if (overwrite)
+                {
+                    _images[_currentIndex] = savedItem;
+                }
+                else
+                {
+                    int insertIndex = Math.Min(_currentIndex + 1, _images.Count);
+                    _images.Insert(insertIndex, savedItem);
+                    _currentIndex = insertIndex;
+                }
+
+                _imageView.Image = null;
+                _currentImage?.Dispose();
+                _currentImage = null;
+                UpdateHeader();
+                _ = LoadCurrentImageAsync();
+            }
+
+            private void RemoveOwnedPath(Guid itemId)
+            {
+                string? ownedPath = null;
+                lock (_pathLock)
+                {
+                    if (_ownedTempPaths.TryGetValue(itemId, out string? cached))
+                    {
+                        ownedPath = cached;
+                        _ownedTempPaths.Remove(itemId);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(ownedPath))
+                    MainViewController.TryDeletePath(ownedPath);
+            }
+        }
+
+        private sealed class ImageEditViewController : UIViewController
+        {
+            private readonly MainViewController _owner;
+            private readonly VaultFileItem _sourceItem;
+            private readonly Action<VaultFileItem, bool> _onSaved;
+
+            private UIImage _workingImage;
+            private bool _ownsWorkingImage;
+            private bool _isDirty;
+
+            private UIImageView? _imageView;
+            private UIVisualEffectView? _toolbarBackground;
+            private UIStackView? _toolbarStack;
+            private UIView? _busyOverlay;
+            private UIActivityIndicatorView? _busyIndicator;
+            private UILabel? _busyLabel;
+            private UIProgressView? _busyProgressView;
+            private UILabel? _busyPercentLabel;
+
+            public ImageEditViewController(
+                MainViewController owner,
+                VaultFileItem sourceItem,
+                UIImage workingImage,
+                Action<VaultFileItem, bool> onSaved)
+            {
+                _owner = owner ?? throw new ArgumentNullException(nameof(owner));
+                _sourceItem = sourceItem ?? throw new ArgumentNullException(nameof(sourceItem));
+                _workingImage = workingImage ?? throw new ArgumentNullException(nameof(workingImage));
+                _onSaved = onSaved ?? throw new ArgumentNullException(nameof(onSaved));
+            }
+
+            public override void ViewDidLoad()
+            {
+                base.ViewDidLoad();
+
+                View!.BackgroundColor = UIColor.Black;
+                Title = "Modifica";
+                NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
+                NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
+                    "Annulla",
+                    UIBarButtonItemStyle.Plain,
+                    (_, _) => CloseEditor());
+                NavigationItem.RightBarButtonItem = new UIBarButtonItem(
+                    "Salva",
+                    UIBarButtonItemStyle.Done,
+                    (_, _) => PromptSaveOptions());
+
+                _imageView = new UIImageView
+                {
+                    ContentMode = UIViewContentMode.ScaleAspectFit,
+                    BackgroundColor = UIColor.Black,
+                    Image = _workingImage
+                };
+
+                _toolbarBackground = new UIVisualEffectView(UIBlurEffect.FromStyle(UIBlurEffectStyle.SystemChromeMaterialDark))
+                {
+                    ClipsToBounds = true
+                };
+                _toolbarBackground.Layer.CornerRadius = 18f;
+
+                _toolbarStack = new UIStackView
+                {
+                    Axis = UILayoutConstraintAxis.Horizontal,
+                    Alignment = UIStackViewAlignment.Center,
+                    Distribution = UIStackViewDistribution.FillEqually,
+                    Spacing = 8f
+                };
+
+                _toolbarBackground.ContentView.AddSubview(_toolbarStack);
+                _toolbarStack.AddArrangedSubview(CreateEditorButton("rotate.left", "SX", RotateLeft));
+                _toolbarStack.AddArrangedSubview(CreateEditorButton("crop", "Crop", OpenCropEditor));
+                _toolbarStack.AddArrangedSubview(CreateEditorButton("rotate.right", "DX", RotateRight));
+
+                _busyOverlay = new UIView
+                {
+                    BackgroundColor = UIColor.FromWhiteAlpha(0f, 0.45f),
+                    Hidden = true
+                };
+
+                _busyIndicator = new UIActivityIndicatorView(UIActivityIndicatorViewStyle.Large)
+                {
+                    Color = UIColor.White,
+                    HidesWhenStopped = true
+                };
+
+                _busyLabel = new UILabel
+                {
+                    TextColor = UIColor.White,
+                    Font = UIFont.SystemFontOfSize(15f, UIFontWeight.Semibold),
+                    TextAlignment = UITextAlignment.Center,
+                    Lines = 2
+                };
+
+                _busyProgressView = new UIProgressView(UIProgressViewStyle.Default)
+                {
+                    TrackTintColor = UIColor.FromWhiteAlpha(1f, 0.18f),
+                    ProgressTintColor = UIColor.White
+                };
+
+                _busyPercentLabel = new UILabel
+                {
+                    TextColor = UIColor.FromWhiteAlpha(1f, 0.86f),
+                    Font = UIFont.MonospacedDigitSystemFontOfSize(13f, UIFontWeight.Medium),
+                    TextAlignment = UITextAlignment.Center
+                };
+
+                _busyOverlay.AddSubview(_busyIndicator);
+                _busyOverlay.AddSubview(_busyLabel);
+                _busyOverlay.AddSubview(_busyProgressView);
+                _busyOverlay.AddSubview(_busyPercentLabel);
+
+                View.AddSubview(_imageView);
+                View.AddSubview(_toolbarBackground);
+                View.AddSubview(_busyOverlay);
+            }
+
+            public override void ViewDidLayoutSubviews()
+            {
+                base.ViewDidLayoutSubviews();
+                if (View == null)
+                    return;
+
+                CGRect bounds = View.Bounds;
+                UIEdgeInsets insets = View.SafeAreaInsets;
+
+                nfloat toolbarHeight = 74f;
+                nfloat toolbarY = bounds.Height - insets.Bottom - toolbarHeight - 14f;
+
+                _imageView!.Frame = new CGRect(
+                    0f,
+                    insets.Top,
+                    bounds.Width,
+                    Math.Max(0f, toolbarY - insets.Top - 12f));
+
+                _toolbarBackground!.Frame = new CGRect(16f, toolbarY, bounds.Width - 32f, toolbarHeight);
+                _toolbarStack!.Frame = _toolbarBackground.ContentView.Bounds.Inset(10f, 10f);
+
+                _busyOverlay!.Frame = bounds;
+                _busyIndicator!.Center = new CGPoint(bounds.GetMidX(), bounds.GetMidY() - 34f);
+                _busyLabel!.Frame = new CGRect(28f, _busyIndicator.Frame.GetMaxY() + 12f, bounds.Width - 56f, 42f);
+                _busyProgressView!.Frame = new CGRect(34f, _busyLabel.Frame.GetMaxY() + 10f, bounds.Width - 68f, 8f);
+                _busyPercentLabel!.Frame = new CGRect(34f, _busyProgressView.Frame.GetMaxY() + 8f, bounds.Width - 68f, 18f);
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing && _ownsWorkingImage)
+                    _workingImage.Dispose();
+
+                base.Dispose(disposing);
+            }
+
+            private UIButton CreateEditorButton(string systemImageName, string fallbackTitle, Action action)
+            {
+                var button = new UIButton(UIButtonType.System);
+                button.TintColor = UIColor.White;
+                if (button.TitleLabel != null)
+                    button.TitleLabel.Font = UIFont.SystemFontOfSize(24f, UIFontWeight.Semibold);
+
+                UIImage? symbol = UIImage.GetSystemImage(systemImageName);
+                if (symbol != null)
+                {
+                    button.SetImage(symbol, UIControlState.Normal);
+                    if (button.ImageView != null)
+                        button.ImageView.ContentMode = UIViewContentMode.ScaleAspectFit;
+                }
+                else
+                {
+                    button.SetTitle(fallbackTitle, UIControlState.Normal);
+                }
+
+                button.TouchUpInside += (_, _) => action();
+                return button;
+            }
+
+            private void CloseEditor()
+            {
+                if (!_isDirty)
+                {
+                    NavigationController?.PopViewController(true);
+                    return;
+                }
+
+                UIAlertController alert = UIAlertController.Create(
+                    "Scarta modifiche?",
+                    "Le modifiche non salvate andranno perse.",
+                    UIAlertControllerStyle.Alert);
+                alert.AddAction(UIAlertAction.Create("Continua a modificare", UIAlertActionStyle.Cancel, null));
+                alert.AddAction(UIAlertAction.Create("Scarta", UIAlertActionStyle.Destructive, _ =>
+                {
+                    NavigationController?.PopViewController(true);
+                }));
+                PresentViewController(alert, true, null);
+            }
+
+            private void RotateLeft() => _ = RotateWorkingImageAsync(clockwise: false);
+
+            private void RotateRight() => _ = RotateWorkingImageAsync(clockwise: true);
+
+            private async Task RotateWorkingImageAsync(bool clockwise)
+            {
+                ShowBusy(clockwise ? "Rotazione a destra..." : "Rotazione a sinistra...");
+                try
+                {
+                    UIImage rotated = await Task.Run(() => MainViewController.RotateImageBy90(_workingImage, clockwise));
+                    ReplaceWorkingImage(rotated, markDirty: true);
+                }
+                finally
+                {
+                    HideBusy();
+                }
+            }
+
+            private void OpenCropEditor()
+            {
+                var cropController = new ImageCropViewController(_workingImage, cropped =>
+                {
+                    ReplaceWorkingImage(cropped, markDirty: true);
+                });
+
+                NavigationController?.PushViewController(cropController, true);
+            }
+
+            private void ReplaceWorkingImage(UIImage image, bool markDirty)
+            {
+                if (_ownsWorkingImage)
+                    _workingImage.Dispose();
+
+                _workingImage = image;
+                _ownsWorkingImage = true;
+                if (markDirty)
+                    _isDirty = true;
+
+                if (_imageView != null)
+                    _imageView.Image = image;
+            }
+
+            private void PromptSaveOptions()
+            {
+                UIAlertController sheet = UIAlertController.Create(
+                    "Salva immagine",
+                    null,
+                    UIAlertControllerStyle.ActionSheet);
+
+                sheet.AddAction(UIAlertAction.Create("Sovrascrivi originale", UIAlertActionStyle.Default, _ =>
+                {
+                    _ = SaveChangesAsync(overwrite: true);
+                }));
+                sheet.AddAction(UIAlertAction.Create("Salva copia", UIAlertActionStyle.Default, _ =>
+                {
+                    _ = SaveChangesAsync(overwrite: false);
+                }));
+                sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+
+                UIPopoverPresentationController? popover = sheet.PopoverPresentationController;
+                if (popover != null && View != null)
+                {
+                    popover.SourceView = View;
+                    popover.SourceRect = new CGRect(View.Bounds.GetMidX(), View.Bounds.GetMidY(), 1, 1);
+                }
+
+                PresentViewController(sheet, true, null);
+            }
+
+            private async Task SaveChangesAsync(bool overwrite)
+            {
+                ShowBusy(overwrite ? "Salvataggio immagine..." : "Creazione copia modificata...", showProgress: true);
+                try
+                {
+                    var progress = new Progress<double>(value => UpdateBusyProgress(value));
+                    VaultFileItem saved = await _owner.SaveEditedImageAsync(_sourceItem, _workingImage, overwrite, progress);
+                    _onSaved(saved, overwrite);
+                    NavigationController?.PopViewController(true);
+                }
+                catch (Exception ex)
+                {
+                    ShowError(ex.Message);
+                }
+                finally
+                {
+                    HideBusy();
+                }
+            }
+
+            private void ShowBusy(string title, bool showProgress = false)
+            {
+                if (_busyOverlay == null)
+                    return;
+
+                _busyLabel!.Text = title;
+                _busyProgressView!.Progress = 0f;
+                _busyPercentLabel!.Text = "0%";
+                _busyProgressView.Hidden = !showProgress;
+                _busyPercentLabel.Hidden = !showProgress;
+                _busyOverlay.Hidden = false;
+                _busyIndicator!.StartAnimating();
+            }
+
+            private void UpdateBusyProgress(double value)
+            {
+                if (_busyProgressView == null || _busyPercentLabel == null)
+                    return;
+
+                float clamped = (float)Math.Max(0d, Math.Min(1d, value));
+                BeginInvokeOnMainThread(() =>
+                {
+                    _busyProgressView.Progress = clamped;
+                    _busyPercentLabel.Text = $"{Math.Round(clamped * 100d):0}%";
+                });
+            }
+
+            private void HideBusy()
+            {
+                if (_busyOverlay == null)
+                    return;
+
+                _busyIndicator!.StopAnimating();
+                _busyOverlay.Hidden = true;
+            }
+
+            private void ShowError(string message)
+            {
+                UIAlertController alert = UIAlertController.Create(
+                    "Operazione non riuscita",
+                    string.IsNullOrWhiteSpace(message) ? "Errore sconosciuto." : message,
+                    UIAlertControllerStyle.Alert);
+                alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, null));
+                PresentViewController(alert, true, null);
+            }
+        }
+
+        private sealed class ImageCropViewController : UIViewController
+        {
+            private const nfloat MinCropSize = 88f;
+            private const nfloat HandleSize = 28f;
+
+            private readonly UIImage _image;
+            private readonly Action<UIImage> _onApplied;
+
+            private UIView? _previewContainer;
+            private UIImageView? _imageView;
+            private UILabel? _hintLabel;
+            private UIView? _topShade;
+            private UIView? _leftShade;
+            private UIView? _rightShade;
+            private UIView? _bottomShade;
+            private UIView? _cropBorder;
+            private UIView? _topLeftHandle;
+            private UIView? _topRightHandle;
+            private UIView? _bottomLeftHandle;
+            private UIView? _bottomRightHandle;
+
+            private CGRect _displayedImageFrame;
+            private CGRect _cropRect;
+            private CGRect _gestureStartRect;
+            private bool _cropInitialized;
+
+            public ImageCropViewController(UIImage image, Action<UIImage> onApplied)
+            {
+                _image = image ?? throw new ArgumentNullException(nameof(image));
+                _onApplied = onApplied ?? throw new ArgumentNullException(nameof(onApplied));
+            }
+
+            public override void ViewDidLoad()
+            {
+                base.ViewDidLoad();
+
+                View!.BackgroundColor = UIColor.Black;
+                Title = "Ritaglia";
+                NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
+                NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
+                    "Annulla",
+                    UIBarButtonItemStyle.Plain,
+                    (_, _) => NavigationController?.PopViewController(true));
+                NavigationItem.RightBarButtonItem = new UIBarButtonItem(
+                    "Applica",
+                    UIBarButtonItemStyle.Done,
+                    (_, _) => ApplyCrop());
+
+                _previewContainer = new UIView
+                {
+                    BackgroundColor = UIColor.Black,
+                    ClipsToBounds = true
+                };
+
+                _imageView = new UIImageView(_image)
+                {
+                    ContentMode = UIViewContentMode.ScaleAspectFit,
+                    BackgroundColor = UIColor.Black
+                };
+
+                _hintLabel = new UILabel
+                {
+                    Text = "Trascina l'area per ritagliare",
+                    TextColor = UIColor.FromWhiteAlpha(1f, 0.78f),
+                    Font = UIFont.SystemFontOfSize(13f, UIFontWeight.Medium),
+                    TextAlignment = UITextAlignment.Center
+                };
+
+                _topShade = CreateShadeView();
+                _leftShade = CreateShadeView();
+                _rightShade = CreateShadeView();
+                _bottomShade = CreateShadeView();
+
+                _cropBorder = new UIView
+                {
+                    BackgroundColor = UIColor.Clear,
+                    UserInteractionEnabled = true
+                };
+                _cropBorder.Layer.BorderColor = UIColor.White.CGColor;
+                _cropBorder.Layer.BorderWidth = 2f;
+                _cropBorder.AddGestureRecognizer(new UIPanGestureRecognizer(HandleMoveCropRect));
+
+                _topLeftHandle = CreateHandleView(0);
+                _topRightHandle = CreateHandleView(1);
+                _bottomLeftHandle = CreateHandleView(2);
+                _bottomRightHandle = CreateHandleView(3);
+
+                _previewContainer.AddSubview(_imageView);
+                _previewContainer.AddSubview(_topShade);
+                _previewContainer.AddSubview(_leftShade);
+                _previewContainer.AddSubview(_rightShade);
+                _previewContainer.AddSubview(_bottomShade);
+                _previewContainer.AddSubview(_cropBorder);
+                _previewContainer.AddSubview(_topLeftHandle);
+                _previewContainer.AddSubview(_topRightHandle);
+                _previewContainer.AddSubview(_bottomLeftHandle);
+                _previewContainer.AddSubview(_bottomRightHandle);
+
+                View.AddSubview(_previewContainer);
+                View.AddSubview(_hintLabel);
+            }
+
+            public override void ViewDidLayoutSubviews()
+            {
+                base.ViewDidLayoutSubviews();
+                if (View == null)
+                    return;
+
+                CGRect bounds = View.Bounds;
+                UIEdgeInsets insets = View.SafeAreaInsets;
+                nfloat hintHeight = 24f;
+                nfloat bottomSpacing = 18f;
+                CGRect previewFrame = new CGRect(
+                    12f,
+                    insets.Top + 12f,
+                    bounds.Width - 24f,
+                    bounds.Height - insets.Top - insets.Bottom - hintHeight - bottomSpacing - 24f);
+
+                _previewContainer!.Frame = previewFrame;
+                _imageView!.Frame = _previewContainer.Bounds;
+                _hintLabel!.Frame = new CGRect(16f, previewFrame.GetMaxY() + 8f, bounds.Width - 32f, hintHeight);
+
+                _displayedImageFrame = GetAspectFitFrame(_image.Size, _previewContainer.Bounds);
+                if (!_cropInitialized)
+                {
+                    nfloat insetX = Math.Min(24f, _displayedImageFrame.Width * 0.12f);
+                    nfloat insetY = Math.Min(24f, _displayedImageFrame.Height * 0.12f);
+                    _cropRect = _displayedImageFrame.Inset(insetX, insetY);
+                    _cropInitialized = true;
+                }
+                else
+                {
+                    _cropRect = ClampMovedRect(_cropRect, _displayedImageFrame);
+                }
+
+                UpdateCropOverlay();
+            }
+
+            private static UIView CreateShadeView()
+            {
+                return new UIView
+                {
+                    BackgroundColor = UIColor.FromWhiteAlpha(0f, 0.55f),
+                    UserInteractionEnabled = false
+                };
+            }
+
+            private UIView CreateHandleView(int tag)
+            {
+                var handle = new UIView
+                {
+                    BackgroundColor = UIColor.White,
+                    Tag = tag
+                };
+                handle.Layer.CornerRadius = HandleSize / 2f;
+                handle.Layer.BorderColor = UIColor.Black.CGColor;
+                handle.Layer.BorderWidth = 1.2f;
+                handle.AddGestureRecognizer(new UIPanGestureRecognizer(HandleResizeCropRect));
+                return handle;
+            }
+
+            private void HandleMoveCropRect(UIPanGestureRecognizer gesture)
+            {
+                if (_previewContainer == null)
+                    return;
+
+                if (gesture.State == UIGestureRecognizerState.Began)
+                    _gestureStartRect = _cropRect;
+
+                CGPoint translation = gesture.TranslationInView(_previewContainer);
+                if (gesture.State is UIGestureRecognizerState.Changed or UIGestureRecognizerState.Ended)
+                {
+                    _cropRect = ClampMovedRect(new CGRect(
+                        _gestureStartRect.X + translation.X,
+                        _gestureStartRect.Y + translation.Y,
+                        _gestureStartRect.Width,
+                        _gestureStartRect.Height), _displayedImageFrame);
+                    UpdateCropOverlay();
+                }
+            }
+
+            private void HandleResizeCropRect(UIPanGestureRecognizer gesture)
+            {
+                if (_previewContainer == null || gesture.View == null)
+                    return;
+
+                if (gesture.State == UIGestureRecognizerState.Began)
+                    _gestureStartRect = _cropRect;
+
+                CGPoint translation = gesture.TranslationInView(_previewContainer);
+                CGRect nextRect = gesture.View.Tag switch
+                {
+                    0 => ResizeTopLeft(_gestureStartRect, translation),
+                    1 => ResizeTopRight(_gestureStartRect, translation),
+                    2 => ResizeBottomLeft(_gestureStartRect, translation),
+                    _ => ResizeBottomRight(_gestureStartRect, translation)
+                };
+
+                _cropRect = nextRect;
+                UpdateCropOverlay();
+            }
+
+            private CGRect ResizeTopLeft(CGRect start, CGPoint translation)
+            {
+                nfloat right = start.GetMaxX();
+                nfloat bottom = start.GetMaxY();
+                nfloat left = Math.Max(_displayedImageFrame.X, Math.Min(start.X + translation.X, right - MinCropSize));
+                nfloat top = Math.Max(_displayedImageFrame.Y, Math.Min(start.Y + translation.Y, bottom - MinCropSize));
+                return new CGRect(left, top, right - left, bottom - top);
+            }
+
+            private CGRect ResizeTopRight(CGRect start, CGPoint translation)
+            {
+                nfloat left = start.X;
+                nfloat bottom = start.GetMaxY();
+                nfloat right = Math.Min(_displayedImageFrame.GetMaxX(), Math.Max(start.GetMaxX() + translation.X, left + MinCropSize));
+                nfloat top = Math.Max(_displayedImageFrame.Y, Math.Min(start.Y + translation.Y, bottom - MinCropSize));
+                return new CGRect(left, top, right - left, bottom - top);
+            }
+
+            private CGRect ResizeBottomLeft(CGRect start, CGPoint translation)
+            {
+                nfloat right = start.GetMaxX();
+                nfloat top = start.Y;
+                nfloat left = Math.Max(_displayedImageFrame.X, Math.Min(start.X + translation.X, right - MinCropSize));
+                nfloat bottom = Math.Min(_displayedImageFrame.GetMaxY(), Math.Max(start.GetMaxY() + translation.Y, top + MinCropSize));
+                return new CGRect(left, top, right - left, bottom - top);
+            }
+
+            private CGRect ResizeBottomRight(CGRect start, CGPoint translation)
+            {
+                nfloat left = start.X;
+                nfloat top = start.Y;
+                nfloat right = Math.Min(_displayedImageFrame.GetMaxX(), Math.Max(start.GetMaxX() + translation.X, left + MinCropSize));
+                nfloat bottom = Math.Min(_displayedImageFrame.GetMaxY(), Math.Max(start.GetMaxY() + translation.Y, top + MinCropSize));
+                return new CGRect(left, top, right - left, bottom - top);
+            }
+
+            private CGRect ClampMovedRect(CGRect rect, CGRect bounds)
+            {
+                nfloat width = Math.Min(rect.Width, bounds.Width);
+                nfloat height = Math.Min(rect.Height, bounds.Height);
+                nfloat maxX = bounds.GetMaxX() - width;
+                nfloat maxY = bounds.GetMaxY() - height;
+                nfloat x = Math.Max(bounds.X, Math.Min(rect.X, maxX));
+                nfloat y = Math.Max(bounds.Y, Math.Min(rect.Y, maxY));
+                return new CGRect(x, y, width, height);
+            }
+
+            private void UpdateCropOverlay()
+            {
+                if (_previewContainer == null ||
+                    _topShade == null ||
+                    _leftShade == null ||
+                    _rightShade == null ||
+                    _bottomShade == null ||
+                    _cropBorder == null)
+                {
+                    return;
+                }
+
+                CGRect imageFrame = _displayedImageFrame;
+                CGRect crop = _cropRect;
+
+                _topShade.Frame = new CGRect(imageFrame.X, imageFrame.Y, imageFrame.Width, Math.Max(0f, crop.Y - imageFrame.Y));
+                _bottomShade.Frame = new CGRect(imageFrame.X, crop.GetMaxY(), imageFrame.Width, Math.Max(0f, imageFrame.GetMaxY() - crop.GetMaxY()));
+                _leftShade.Frame = new CGRect(imageFrame.X, crop.Y, Math.Max(0f, crop.X - imageFrame.X), crop.Height);
+                _rightShade.Frame = new CGRect(crop.GetMaxX(), crop.Y, Math.Max(0f, imageFrame.GetMaxX() - crop.GetMaxX()), crop.Height);
+                _cropBorder.Frame = crop;
+
+                PositionHandle(_topLeftHandle, crop.X, crop.Y);
+                PositionHandle(_topRightHandle, crop.GetMaxX(), crop.Y);
+                PositionHandle(_bottomLeftHandle, crop.X, crop.GetMaxY());
+                PositionHandle(_bottomRightHandle, crop.GetMaxX(), crop.GetMaxY());
+            }
+
+            private void PositionHandle(UIView? handle, nfloat centerX, nfloat centerY)
+            {
+                if (handle == null)
+                    return;
+
+                handle.Frame = new CGRect(
+                    centerX - (HandleSize / 2f),
+                    centerY - (HandleSize / 2f),
+                    HandleSize,
+                    HandleSize);
+            }
+
+            private void ApplyCrop()
+            {
+                if (_displayedImageFrame.Width <= 0f || _displayedImageFrame.Height <= 0f)
+                    return;
+
+                nfloat scaleX = _image.Size.Width / _displayedImageFrame.Width;
+                nfloat scaleY = _image.Size.Height / _displayedImageFrame.Height;
+
+                CGRect cropInImage = new CGRect(
+                    (_cropRect.X - _displayedImageFrame.X) * scaleX,
+                    (_cropRect.Y - _displayedImageFrame.Y) * scaleY,
+                    _cropRect.Width * scaleX,
+                    _cropRect.Height * scaleY);
+
+                UIImage cropped = MainViewController.CropImage(_image, cropInImage);
+                NavigationController?.PopViewController(true);
+                _onApplied(cropped);
+            }
+
+            private static CGRect GetAspectFitFrame(CGSize contentSize, CGRect bounds)
+            {
+                if (contentSize.Width <= 0f || contentSize.Height <= 0f || bounds.Width <= 0f || bounds.Height <= 0f)
+                    return CGRect.Empty;
+
+                nfloat scale = Math.Min(bounds.Width / contentSize.Width, bounds.Height / contentSize.Height);
+                nfloat width = contentSize.Width * scale;
+                nfloat height = contentSize.Height * scale;
+                nfloat x = bounds.X + ((bounds.Width - width) / 2f);
+                nfloat y = bounds.Y + ((bounds.Height - height) / 2f);
+                return new CGRect(x, y, width, height);
+            }
         }
 
         private sealed class InAppVideoPlayerViewController : UIViewController
@@ -4855,8 +5781,13 @@ namespace vault.iOS
                     ShowsPlaybackControls = true
                 };
 
-                AddChildViewController(_playerController);
-                View.AddSubview(_playerController.View);
+                AVPlayerViewController playerController = _playerController;
+                UIView? playerView = playerController.View;
+                if (playerView == null)
+                    throw new InvalidOperationException("Player video non disponibile.");
+
+                AddChildViewController(playerController);
+                View.AddSubview(playerView);
                 _playerController.DidMoveToParentViewController(this);
             }
 
