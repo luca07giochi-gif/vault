@@ -88,6 +88,24 @@ jobs:
           echo "Prime righe contenenti error/warning:"
           grep -Ein "error|warning" publish-ios.log | tail -n 200 || true
 
+      - name: Inspect share extension build output
+        if: always()
+        shell: bash
+        run: |
+          echo "Contenuto output extension:"
+          if [ ! -d "vault.iOS.ShareExtension/bin" ]; then
+            echo "La cartella vault.iOS.ShareExtension/bin non esiste."
+            exit 0
+          fi
+
+          find vault.iOS.ShareExtension/bin -maxdepth 6 | sed 's/^/ - /'
+          APPEX_PATH=$(find vault.iOS.ShareExtension/bin -type d -name "*.appex" | head -n 1 || true)
+          if [ -n "$APPEX_PATH" ]; then
+            echo "Extension bundle trovato: $APPEX_PATH"
+          else
+            echo "Nessun .appex trovato nell'output del progetto extension."
+          fi
+
       - name: Locate IPA
         if: always()
         id: locate
