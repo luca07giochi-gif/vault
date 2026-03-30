@@ -28,6 +28,9 @@
   <ItemGroup>
     <ProjectReference Include="..\vault.Core\vault.Core.csproj" />
     <ProjectReference Include="..\vault.iOS.Shared\vault.iOS.Shared.csproj" />
+    <ProjectReference Include="..\vault.iOS.ShareExtension\vault.iOS.ShareExtension.csproj">
+      <IsAppExtension>true</IsAppExtension>
+    </ProjectReference>
   </ItemGroup>
 
   <ItemGroup>
@@ -39,34 +42,5 @@
       <LogicalName>%(Filename)%(Extension)</LogicalName>
     </BundleResource>
   </ItemGroup>
-
-  <Target Name="BuildShareExtensionBundle">
-    <MSBuild
-      Projects="..\vault.iOS.ShareExtension\vault.iOS.ShareExtension.csproj"
-      Targets="Restore;Build"
-      Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier);BuildIpa=false;CreatePackage=false;EnableCodeSigning=$(EnableCodeSigning);CheckEolWorkloads=false;CheckEolTargetFramework=false" />
-  </Target>
-
-  <Target Name="EmbedShareExtensionBundle" AfterTargets="Build" DependsOnTargets="BuildShareExtensionBundle">
-    <ItemGroup>
-      <_ShareExtensionBundle Include="..\vault.iOS.ShareExtension\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\*.appex" />
-    </ItemGroup>
-
-    <Error
-      Condition="'@(_ShareExtensionBundle)' == ''"
-      Text="Share extension bundle non trovato in vault.iOS.ShareExtension/bin/$(Configuration)/$(TargetFramework)/$(RuntimeIdentifier)." />
-
-    <Message
-      Importance="High"
-      Text="Embedding share extension bundle: @(_ShareExtensionBundle) into $(AppBundleDir)PlugIns" />
-
-    <Error
-      Condition="'$(AppBundleDir)' == ''"
-      Text="AppBundleDir non valorizzata durante l'embed della share extension." />
-
-    <Exec Command="mkdir -p &quot;$(AppBundleDir)PlugIns&quot;" />
-    <Exec Command="rm -rf &quot;$(AppBundleDir)PlugIns/%(_ShareExtensionBundle.Filename)%(_ShareExtensionBundle.Extension)&quot;" Condition="Exists('$(AppBundleDir)PlugIns/%(_ShareExtensionBundle.Filename)%(_ShareExtensionBundle.Extension)')" />
-    <Exec Command="cp -R &quot;%(_ShareExtensionBundle.FullPath)&quot; &quot;$(AppBundleDir)PlugIns/&quot;" />
-  </Target>
 
 </Project>
