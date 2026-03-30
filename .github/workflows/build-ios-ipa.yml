@@ -86,6 +86,75 @@ jobs:
           echo "ipa_path=$IPA_PATH" >> "$GITHUB_OUTPUT"
           echo "IPA: $IPA_PATH"
 
+      - name: Inspect app bundle for extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find vault.iOS/bin/Release -type d -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "App bundle non trovato nel publish output."
+            find vault.iOS/bin/Release -maxdepth 6 -type d | sed 's/^/ - /'
+            exit 1
+          fi
+
+          echo "App bundle trovato: $APP_PATH"
+          if [ ! -d "$APP_PATH/PlugIns" ]; then
+            echo "La cartella PlugIns non esiste nell'app bundle."
+            find "$APP_PATH" -maxdepth 3 -type d | sed 's/^/ - /'
+            exit 1
+          fi
+
+          echo "Contenuto PlugIns:"
+          find "$APP_PATH/PlugIns" -maxdepth 2 | sed 's/^/ - /'
+
+          APPEX_PATH=$(find "$APP_PATH/PlugIns" -type d -name "*.appex" | head -n 1)
+          if [ -z "$APPEX_PATH" ]; then
+            echo "Nessuna estensione .appex trovata nel bundle."
+            exit 1
+          fi
+
+          echo "Estensione rilevata: $APPEX_PATH"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$APPEX_PATH/Info.plist" || true
+
+      - name: Inspect IPA contents for extensions
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA_PATH="${{ steps.locate.outputs.ipa_path }}"
+          TMP_DIR=$(mktemp -d)
+          unzip -q "$IPA_PATH" -d "$TMP_DIR"
+
+          APP_PATH=$(find "$TMP_DIR/Payload" -type d -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "App bundle non trovato dentro l'IPA."
+            find "$TMP_DIR" -maxdepth 4 | sed 's/^/ - /'
+            exit 1
+          fi
+
+          echo "App bundle IPA: $APP_PATH"
+          if [ ! -d "$APP_PATH/PlugIns" ]; then
+            echo "Nell'IPA manca la cartella PlugIns."
+            find "$APP_PATH" -maxdepth 3 | sed 's/^/ - /'
+            exit 1
+          fi
+
+          echo "Contenuto PlugIns nell'IPA:"
+          find "$APP_PATH/PlugIns" -maxdepth 2 | sed 's/^/ - /'
+
+          APPEX_PATH=$(find "$APP_PATH/PlugIns" -type d -name "*.appex" | head -n 1)
+          if [ -z "$APPEX_PATH" ]; then
+            echo "Nell'IPA non e presente alcuna estensione .appex."
+            exit 1
+          fi
+
+          echo "Estensione IPA rilevata: $APPEX_PATH"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$APPEX_PATH/Info.plist" || true
+          rm -rf "$TMP_DIR"
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v6
         with:
