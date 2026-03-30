@@ -15,6 +15,7 @@ using PhotosUI;
 using SharpCompress.Archives;
 using UIKit;
 using vault.Core.Domain;
+using vault.iOS.Shared;
 
 namespace vault.iOS
 {
@@ -104,6 +105,9 @@ namespace vault.iOS
         private PickerDelegate? _pickerDelegate;
         private GalleryMultiPickerDelegate? _galleryMultiPickerDelegate;
         private string? _activePreviewTemporaryPath;
+        private SharedVaultQueueStore? _sharedQueueStore;
+        private string? _currentVaultRecentId;
+        private bool _pendingImportPromptVisible;
 
         public static void CleanupStaleRuntimeTemporaryFiles()
         {
@@ -765,6 +769,8 @@ namespace vault.iOS
             _vaultUrl = null;
             _sessionPassword = string.Empty;
             _currentFolder = string.Empty;
+            _currentVaultRecentId = null;
+            _pendingImportPromptVisible = false;
             _isSelectionMode = false;
             _selectedItemIds.Clear();
             _visibleItems.Clear();
@@ -1225,6 +1231,235 @@ namespace vault.iOS
             _selectedItemIds.Clear();
             ClearThumbnailCache();
             ReloadFolderItems();
+        }
+
+        private SharedVaultQueueStore? TryGetSharedQueueStore(bool showErrorIfUnavailable)
+        {
+            if (_sharedQueueStore != null)
+                return _sharedQueueStore;
+
+            try
+            {
+                NSUrl? containerUrl = NSFileManager.DefaultManager.GetContainerUrl(AppGroupConfig.Identifier);
+                string? rootPath = containerUrl?.Path;
+                if (string.IsNullOrWhiteSpace(rootPath))
+                    throw new InvalidOperationException("Contenitore condiviso non disponibile.");
+
+                _sharedQueueStore = new SharedVaultQueueStore(rootPath);
+                return _sharedQueueStore;
+            }
+            catch (Exception ex)
+            {
+                if (showErrorIfUnavailable)
+                    ShowError(ex.Message);
+                return null;
+            }
+        }
+
+        private void RegisterCurrentVaultAsRecent()
+        {
+            if (_session == null || _vaultUrl == null)
+                return;
+
+            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: false);
+            if (store == null)
+                return;
+
+            string? vaultPath = _vaultUrl.Path;
+            RecentVaultRecord? existing = store.FindRecentVaultByPath(vaultPath);
+            string displayName = _vaultUrl.LastPathComponent
+                ?? Path.GetFileName(vaultPath ?? string.Empty)
+                ?? "Vault";
+
+            RecentVaultRecord record = new()
+            {
+                VaultId = existing?.VaultId ?? string.Empty,
+                DisplayName = displayName,
+                LastKnownPath = vaultPath ?? string.Empty,
+                BookmarkDataBase64 = existing?.BookmarkDataBase64,
+                StorageFormat = _session.StorageFormat.ToString(),
+                LastOpenedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                IsPinned = existing?.IsPinned ?? false
+            };
+
+            RecentVaultRecord saved = store.UpsertRecentVault(record);
+            _currentVaultRecentId = saved.VaultId;
+        }
+
+        private void PromptPendingImportsForCurrentVaultIfNeeded()
+        {
+            if (_session == null || string.IsNullOrWhiteSpace(_currentVaultRecentId) || _pendingImportPromptVisible)
+                return;
+
+            string currentVaultRecentId = _currentVaultRecentId;
+            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: false);
+            if (store == null)
+                return;
+
+            PendingImportAggregate? aggregate = store.GetPendingAggregateForVault(currentVaultRecentId);
+            if (aggregate == null || aggregate.FileCount <= 0)
+                return;
+
+            _pendingImportPromptVisible = true;
+            string message = aggregate.JobCount <= 1
+                ? $"Ci sono {aggregate.FileCount} file in attesa per questo dispositivo."
+                : $"Ci sono {aggregate.FileCount} file in attesa per questo dispositivo in {aggregate.JobCount} invii.";
+
+            UIAlertController alert = UIAlertController.Create(
+                "File in attesa",
+                message,
+                UIAlertControllerStyle.Alert);
+
+            alert.AddAction(UIAlertAction.Create("Piu tardi", UIAlertActionStyle.Cancel, __ =>
+            {
+                _pendingImportPromptVisible = false;
+            }));
+            alert.AddAction(UIAlertAction.Create("Scarta", UIAlertActionStyle.Destructive, __ =>
+            {
+                _pendingImportPromptVisible = false;
+                _ = DiscardPendingImportsAsync(aggregate.JobIds);
+            }));
+            alert.AddAction(UIAlertAction.Create("Scegli cartella", UIAlertActionStyle.Default, __ =>
+            {
+                _pendingImportPromptVisible = false;
+                PresentPendingImportDestinationPage(aggregate);
+            }));
+
+            PresentViewController(alert, true, null);
+        }
+
+        private void PresentPendingImportDestinationPage(PendingImportAggregate aggregate)
+        {
+            if (_session == null || NavigationController == null || aggregate == null || aggregate.JobIds.Length == 0)
+                return;
+
+            var page = new PendingImportDestinationViewController(
+                _session,
+                _currentFolder,
+                aggregate.FileCount,
+                destinationPath => _ = ImportPendingJobsToDestinationAsync(aggregate.JobIds, destinationPath));
+
+            NavigationController.PushViewController(page, true);
+        }
+
+        private async Task DiscardPendingImportsAsync(string[] jobIds)
+        {
+            if (jobIds == null || jobIds.Length == 0)
+                return;
+
+            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: true);
+            if (store == null)
+                return;
+
+            await RunBusyAsync("Eliminazione file in attesa...", async () =>
+            {
+                await Task.Run(() =>
+                {
+                    try
+                    {
+                        foreach (string jobId in jobIds)
+                            store.UpdatePendingJobStatus(jobId, PendingImportStatus.Discarded);
+                    }
+                    catch
+                    {
+                        // Best effort status update.
+                    }
+
+                    store.DeleteJobs(jobIds);
+                });
+            });
+        }
+
+        private async Task ImportPendingJobsToDestinationAsync(string[] jobIds, string destinationPath)
+        {
+            if (_session == null || jobIds == null || jobIds.Length == 0)
+                return;
+            if (string.IsNullOrWhiteSpace(_currentVaultRecentId))
+                return;
+
+            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: true);
+            if (store == null)
+                return;
+
+            string currentVaultRecentId = _currentVaultRecentId;
+            IReadOnlyList<PendingImportJob> jobs = store.LoadPendingJobs(jobIds)
+                .Where(job =>
+                    job.Status == PendingImportStatus.Pending &&
+                    string.Equals(job.VaultId, currentVaultRecentId, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(job => job.CreatedAtUtc)
+                .ToArray();
+
+            if (jobs.Count == 0)
+            {
+                ShowError("Nessun file in attesa da importare.");
+                return;
+            }
+
+            string rollbackPassword = _sessionPassword;
+            string rollbackFolder = _currentFolder;
+            string normalizedDestination = NormalizeFolderPath(destinationPath);
+
+            await RunBusyWithProgressAsync("Importazione file in attesa...", async progress =>
+            {
+                if (_session == null)
+                    return;
+
+                int totalItems = jobs.Sum(job => job.Items?.Count ?? 0);
+                if (totalItems <= 0)
+                    throw new InvalidOperationException("Nessun file disponibile nel job selezionato.");
+
+                try
+                {
+                    foreach (PendingImportJob job in jobs)
+                        store.UpdatePendingJobStatus(job.JobId, PendingImportStatus.Importing);
+
+                    ReportProgress(progress, 6d);
+                    EnsureDestinationFolderExistsForMove(normalizedDestination);
+
+                    int processedItems = 0;
+                    foreach (PendingImportJob job in jobs)
+                    {
+                        foreach (PendingImportItem item in job.Items)
+                        {
+                            string stagedPath = store.ResolveStagedFilePath(job, item);
+                            if (!File.Exists(stagedPath))
+                                throw new FileNotFoundException("File in attesa non trovato.", stagedPath);
+
+                            await Task.Run(() => _session.AddFileFromPath(stagedPath, normalizedDestination));
+                            processedItems++;
+                            double itemProgress = 10d + (processedItems / (double)totalItems) * 58d;
+                            ReportProgress(progress, itemProgress);
+                        }
+                    }
+
+                    await PersistVaultAsync(CreateScaledProgress(progress, 70d, 100d));
+                    EnsureCurrentFolderStillExists();
+                    ReloadFolderItems();
+                }
+                catch (Exception ex)
+                {
+                    foreach (PendingImportJob job in jobs)
+                        store.UpdatePendingJobStatus(job.JobId, PendingImportStatus.Pending, ex.Message);
+
+                    await RestoreSessionFromDiskAsync(rollbackPassword, rollbackFolder);
+                    throw;
+                }
+            });
+
+            try
+            {
+                await Task.Run(() =>
+                {
+                    foreach (PendingImportJob job in jobs)
+                        store.UpdatePendingJobStatus(job.JobId, PendingImportStatus.Completed);
+
+                    store.DeleteJobs(jobs.Select(job => job.JobId));
+                });
+            }
+            catch
+            {
+                // Best effort cleanup. Jobs already completed and won't be prompted again.
+            }
         }
 
         private void OnFolderTreeClosed(string selectedFolderPath, bool hasChanges)
@@ -1989,6 +2224,7 @@ namespace vault.iOS
                 return;
             }
 
+            bool opened = false;
             await RunBusyWithProgressAsync("Apertura vault...", async progress =>
             {
                 GC.Collect();
@@ -2008,7 +2244,14 @@ namespace vault.iOS
                 ClearThumbnailDiskCache();
 
                 ReloadFolderItems();
+                opened = true;
             });
+
+            if (!opened || _session == null || _vaultUrl == null)
+                return;
+
+            RegisterCurrentVaultAsRecent();
+            PromptPendingImportsForCurrentVaultIfNeeded();
         }
 
         private async Task AddPickedFilesAsync(NSUrl[] urls)
@@ -4637,8 +4880,15 @@ namespace vault.iOS
             private static string NormalizeFolderName(string name)
             {
                 string trimmed = name?.Trim() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(trimmed))
+                    return string.Empty;
                 if (trimmed.Contains('/') || trimmed.Contains('\\'))
                     return string.Empty;
+                if (string.Equals(trimmed, ".", StringComparison.Ordinal) ||
+                    string.Equals(trimmed, "..", StringComparison.Ordinal))
+                {
+                    return string.Empty;
+                }
                 return trimmed;
             }
 
@@ -4685,6 +4935,215 @@ namespace vault.iOS
                 {
                     UITableViewCell cell = tableView.DequeueReusableCell(MoveCellId)
                         ?? new UITableViewCell(UITableViewCellStyle.Subtitle, MoveCellId);
+
+                    string path = _owner._folderPaths[indexPath.Row];
+                    string displayName = string.IsNullOrWhiteSpace(path)
+                        ? "/"
+                        : path.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? path;
+
+                    int depth = string.IsNullOrWhiteSpace(path)
+                        ? 0
+                        : path.Split('/', StringSplitOptions.RemoveEmptyEntries).Length;
+                    cell.IndentationLevel = depth;
+                    cell.IndentationWidth = 14f;
+
+                    UIListContentConfiguration content = cell.DefaultContentConfiguration;
+                    content.Text = $"[DIR] {displayName}";
+                    content.SecondaryText = string.IsNullOrWhiteSpace(path) ? "/" : $"/{path}";
+                    cell.ContentConfiguration = content;
+                    cell.Accessory = string.Equals(path, _owner._selectedDestination, StringComparison.OrdinalIgnoreCase)
+                        ? UITableViewCellAccessory.Checkmark
+                        : UITableViewCellAccessory.None;
+                    return cell;
+                }
+
+                public override void RowSelected(UITableView tableView, NSIndexPath indexPath)
+                {
+                    tableView.DeselectRow(indexPath, true);
+                    _owner.HandleFolderTapped(indexPath.Row);
+                }
+            }
+        }
+
+        private sealed class PendingImportDestinationViewController : UIViewController
+        {
+            private const string ImportCellId = "PendingImportDestinationCell";
+
+            private readonly VaultPortableReader _session;
+            private readonly Action<string> _onImportConfirmed;
+            private readonly List<string> _folderPaths = new();
+            private readonly int _fileCount;
+            private string _selectedDestination;
+            private UITableView? _tableView;
+
+            public PendingImportDestinationViewController(
+                VaultPortableReader session,
+                string currentFolder,
+                int fileCount,
+                Action<string> onImportConfirmed)
+            {
+                _session = session ?? throw new ArgumentNullException(nameof(session));
+                _fileCount = Math.Max(0, fileCount);
+                _selectedDestination = NormalizeFolderPath(currentFolder);
+                _onImportConfirmed = onImportConfirmed ?? throw new ArgumentNullException(nameof(onImportConfirmed));
+            }
+
+            public override void ViewDidLoad()
+            {
+                base.ViewDidLoad();
+
+                View!.BackgroundColor = UIColor.White;
+                Title = _fileCount == 1 ? "Importa file in attesa" : $"Importa {_fileCount} file";
+                NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
+                NavigationItem.RightBarButtonItems = new[]
+                {
+                    new UIBarButtonItem("Importa qui", UIBarButtonItemStyle.Done, (_, _) => ConfirmImport()),
+                    new UIBarButtonItem("Nuova", UIBarButtonItemStyle.Plain, (_, _) => PromptCreateFolder(_selectedDestination))
+                };
+
+                _tableView = new UITableView(View.Bounds, UITableViewStyle.InsetGrouped)
+                {
+                    AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight,
+                    Source = new PendingImportDestinationSource(this)
+                };
+                View.AddSubview(_tableView);
+
+                ReloadFolders();
+            }
+
+            private void ReloadFolders()
+            {
+                _folderPaths.Clear();
+                _folderPaths.AddRange(_session.GetAllFolderPaths().OrderBy(path => path, StringComparer.OrdinalIgnoreCase));
+                EnsureSelectedDestinationExists();
+                _tableView?.ReloadData();
+            }
+
+            private void EnsureSelectedDestinationExists()
+            {
+                if (_folderPaths.Any(path => string.Equals(path, _selectedDestination, StringComparison.OrdinalIgnoreCase)))
+                    return;
+
+                string probe = _selectedDestination;
+                while (!string.IsNullOrWhiteSpace(probe))
+                {
+                    probe = GetParentPath(probe);
+                    if (_folderPaths.Any(path => string.Equals(path, probe, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        _selectedDestination = probe;
+                        return;
+                    }
+                }
+
+                _selectedDestination = string.Empty;
+            }
+
+            private void HandleFolderTapped(int index)
+            {
+                if (index < 0 || index >= _folderPaths.Count)
+                    return;
+
+                _selectedDestination = _folderPaths[index];
+                _tableView?.ReloadData();
+            }
+
+            private void ConfirmImport()
+            {
+                string destination = _selectedDestination;
+                _onImportConfirmed(destination);
+                NavigationController?.PopViewController(true);
+            }
+
+            private void PromptCreateFolder(string parentPath)
+            {
+                UIAlertController alert = UIAlertController.Create("Nuova cartella", null, UIAlertControllerStyle.Alert);
+                alert.AddTextField(field =>
+                {
+                    field.Placeholder = "Nome cartella";
+                    field.ClearButtonMode = UITextFieldViewMode.WhileEditing;
+                });
+
+                alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+                alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, _ =>
+                {
+                    string rawName = alert.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
+                    string name = NormalizeFolderName(rawName);
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        ShowError("Inserisci un nome cartella valido.");
+                        return;
+                    }
+
+                    string normalizedParent = NormalizeFolderPath(parentPath);
+                    string fullPath = string.IsNullOrWhiteSpace(normalizedParent)
+                        ? name
+                        : $"{normalizedParent}/{name}";
+                    if (_folderPaths.Any(path => string.Equals(path, fullPath, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        ShowError("Esiste gia una cartella con questo nome nella posizione scelta.");
+                        return;
+                    }
+
+                    _folderPaths.Add(fullPath);
+                    _folderPaths.Sort(StringComparer.OrdinalIgnoreCase);
+                    _selectedDestination = fullPath;
+                    _tableView?.ReloadData();
+                }));
+
+                PresentViewController(alert, true, null);
+            }
+
+            private static string NormalizeFolderName(string name)
+            {
+                string trimmed = name?.Trim() ?? string.Empty;
+                if (trimmed.Contains('/') || trimmed.Contains('\\'))
+                    return string.Empty;
+                return trimmed;
+            }
+
+            private static string NormalizeFolderPath(string? path)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    return string.Empty;
+
+                return path.Trim().Trim('/');
+            }
+
+            private static string GetParentPath(string folderPath)
+            {
+                if (string.IsNullOrWhiteSpace(folderPath))
+                    return string.Empty;
+
+                int idx = folderPath.LastIndexOf('/');
+                return idx < 0 ? string.Empty : folderPath[..idx];
+            }
+
+            private void ShowError(string message)
+            {
+                UIAlertController alert = UIAlertController.Create(
+                    "Operazione non riuscita",
+                    string.IsNullOrWhiteSpace(message) ? "Errore sconosciuto." : message,
+                    UIAlertControllerStyle.Alert);
+                alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, null));
+                PresentViewController(alert, true, null);
+            }
+
+            private sealed class PendingImportDestinationSource : UITableViewSource
+            {
+                private readonly PendingImportDestinationViewController _owner;
+
+                public PendingImportDestinationSource(PendingImportDestinationViewController owner)
+                {
+                    _owner = owner;
+                }
+
+                public override nint RowsInSection(UITableView tableView, nint section) =>
+                    _owner._folderPaths.Count;
+
+                public override UITableViewCell GetCell(UITableView tableView, NSIndexPath indexPath)
+                {
+                    UITableViewCell cell = tableView.DequeueReusableCell(ImportCellId)
+                        ?? new UITableViewCell(UITableViewCellStyle.Subtitle, ImportCellId);
 
                     string path = _owner._folderPaths[indexPath.Row];
                     string displayName = string.IsNullOrWhiteSpace(path)

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-ios16.4</TargetFramework>
+    <OutputType>Library</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <RootNamespace>vault.iOS.ShareExtension</RootNamespace>
+    <AssemblyName>vault.iOS.ShareExtension</AssemblyName>
+
+    <ApplicationTitle>Vault Share</ApplicationTitle>
+    <ApplicationId>com.luca07giochi.vaultios.share</ApplicationId>
+    <ApplicationDisplayVersion>1.2.3</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+
+    <SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion>
+    <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
+    <IsAppExtension>true</IsAppExtension>
+    <CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
+    <MtouchLink>SdkOnly</MtouchLink>
+    <PublishTrimmed>true</PublishTrimmed>
+    <CheckEolWorkloads>false</CheckEolWorkloads>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\\vault.iOS.Shared\\vault.iOS.Shared.csproj" />
+  </ItemGroup>
+
+</Project>

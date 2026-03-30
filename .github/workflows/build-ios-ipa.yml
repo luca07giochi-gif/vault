@@ -8,6 +8,8 @@ on:
       - ".github/workflows/build-ios-ipa.yml"
       - "global.json"
       - "vault.iOS/**"
+      - "vault.iOS.Shared/**"
+      - "vault.iOS.ShareExtension/**"
       - "vault.Core/**"
 
 env:
