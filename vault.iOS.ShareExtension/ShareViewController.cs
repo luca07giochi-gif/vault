@@ -9,6 +9,9 @@ namespace vault.iOS.ShareExtension
     public sealed class ShareViewController : UIViewController
     {
         private const string CellId = "RecentVaultCell";
+        private static readonly UIColor BackgroundColor = UIColor.White;
+        private static readonly UIColor PrimaryTextColor = UIColor.Black;
+        private static readonly UIColor SecondaryTextColor = UIColor.FromRGB(110, 110, 115);
 
         private readonly List<RecentVaultRecord> _recentVaults = new();
         private UILabel? _summaryLabel;
@@ -32,14 +35,14 @@ namespace vault.iOS.ShareExtension
 
         private void BuildUi()
         {
-            View!.BackgroundColor = UIColor.SystemBackgroundColor;
+            View!.BackgroundColor = BackgroundColor;
 
             UILabel titleLabel = new()
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 Text = "Invia a Vault",
                 Font = UIFont.BoldSystemFontOfSize(22f),
-                TextColor = UIColor.LabelColor
+                TextColor = PrimaryTextColor
             };
 
             _summaryLabel = new UILabel
@@ -47,7 +50,7 @@ namespace vault.iOS.ShareExtension
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 Lines = 0,
                 Font = UIFont.SystemFontOfSize(15f),
-                TextColor = UIColor.SecondaryLabelColor
+                TextColor = SecondaryTextColor
             };
 
             _emptyLabel = new UILabel
@@ -56,7 +59,7 @@ namespace vault.iOS.ShareExtension
                 Lines = 0,
                 Font = UIFont.SystemFontOfSize(15f),
                 TextAlignment = UITextAlignment.Center,
-                TextColor = UIColor.SecondaryLabelColor,
+                TextColor = SecondaryTextColor,
                 Hidden = true
             };
 
@@ -87,7 +90,7 @@ namespace vault.iOS.ShareExtension
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 Font = UIFont.SystemFontOfSize(14f),
-                TextColor = UIColor.SecondaryLabelColor,
+                TextColor = SecondaryTextColor,
                 Hidden = true
             };
 
