@@ -23,11 +23,6 @@
     <CheckEolWorkloads>false</CheckEolWorkloads>
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
 
-    <CreateIpaDependsOn>
-      BuildShareExtensionBundle;
-      EmbedShareExtensionBundle;
-      $(CreateIpaDependsOn)
-    </CreateIpaDependsOn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -52,7 +47,7 @@
       Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier);BuildIpa=false;CreatePackage=false;EnableCodeSigning=$(EnableCodeSigning);CheckEolWorkloads=false;CheckEolTargetFramework=false" />
   </Target>
 
-  <Target Name="EmbedShareExtensionBundle" DependsOnTargets="BuildShareExtensionBundle">
+  <Target Name="EmbedShareExtensionBundle" AfterTargets="Build" DependsOnTargets="BuildShareExtensionBundle">
     <ItemGroup>
       <_ShareExtensionBundle Include="..\vault.iOS.ShareExtension\bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\*.appex" />
     </ItemGroup>
@@ -64,6 +59,10 @@
     <Message
       Importance="High"
       Text="Embedding share extension bundle: @(_ShareExtensionBundle) into $(AppBundleDir)PlugIns" />
+
+    <Error
+      Condition="'$(AppBundleDir)' == ''"
+      Text="AppBundleDir non valorizzata durante l'embed della share extension." />
 
     <Exec Command="mkdir -p &quot;$(AppBundleDir)PlugIns&quot;" />
     <Exec Command="rm -rf &quot;$(AppBundleDir)PlugIns/%(_ShareExtensionBundle.Filename)%(_ShareExtensionBundle.Extension)&quot;" Condition="Exists('$(AppBundleDir)PlugIns/%(_ShareExtensionBundle.Filename)%(_ShareExtensionBundle.Extension)')" />
