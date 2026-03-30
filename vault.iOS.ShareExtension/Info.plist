@@ -6,7 +6,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Vault Share</string>
+    <string>Vault</string>
     <key>CFBundleExecutable</key>
     <string>vault.iOS.ShareExtension</string>
     <key>CFBundleIdentifier</key>
@@ -14,7 +14,7 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Vault Share</string>
+    <string>Vault</string>
     <key>CFBundlePackageType</key>
     <string>XPC!</string>
     <key>CFBundleShortVersionString</key>
@@ -33,7 +33,7 @@
       <key>NSExtensionPointIdentifier</key>
       <string>com.apple.share-services</string>
       <key>NSExtensionPrincipalClass</key>
-      <string>vault.iOS.ShareExtension.ShareViewController</string>
+      <string>ShareViewController</string>
     </dict>
   </dict>
 </plist>
