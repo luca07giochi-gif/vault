@@ -5425,8 +5425,8 @@ namespace vault.iOS
 
         private sealed class ImageCropViewController : UIViewController
         {
-            private const nfloat MinCropSize = 88f;
-            private const nfloat HandleSize = 28f;
+            private static readonly nfloat MinCropSize = 88f;
+            private static readonly nfloat HandleSize = 28f;
 
             private readonly UIImage _image;
             private readonly Action<UIImage> _onApplied;
