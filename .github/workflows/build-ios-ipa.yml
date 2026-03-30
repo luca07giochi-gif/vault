@@ -43,6 +43,11 @@ jobs:
       - name: Install iOS workload
         run: dotnet workload install ios --skip-manifest-update
 
+      - name: Restore iOS app projects
+        run: |
+          dotnet restore vault.iOS/vault.iOS.csproj
+          dotnet restore vault.iOS.ShareExtension/vault.iOS.ShareExtension.csproj
+
       - name: Publish iOS IPA (unsigned)
         id: publish
         continue-on-error: true

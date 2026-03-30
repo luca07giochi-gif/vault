@@ -43,7 +43,7 @@
   <Target Name="BuildShareExtensionBundle">
     <MSBuild
       Projects="..\vault.iOS.ShareExtension\vault.iOS.ShareExtension.csproj"
-      Targets="Build"
+      Targets="Restore;Build"
       Properties="Configuration=$(Configuration);TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier);BuildIpa=false;CreatePackage=false;EnableCodeSigning=$(EnableCodeSigning);CheckEolWorkloads=false;CheckEolTargetFramework=false" />
   </Target>
 
