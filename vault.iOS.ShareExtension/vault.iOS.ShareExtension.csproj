@@ -17,6 +17,7 @@
     <SupportedOSPlatformVersion>15.0</SupportedOSPlatformVersion>
     <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
     <IsAppExtension>true</IsAppExtension>
+    <IsWatchExtension>false</IsWatchExtension>
     <CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
     <MtouchLink>SdkOnly</MtouchLink>
     <PublishTrimmed>true</PublishTrimmed>

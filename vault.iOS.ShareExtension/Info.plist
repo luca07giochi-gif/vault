@@ -28,14 +28,7 @@
       <key>NSExtensionAttributes</key>
       <dict>
         <key>NSExtensionActivationRule</key>
-        <dict>
-          <key>NSExtensionActivationSupportsImageWithMaxCount</key>
-          <integer>50</integer>
-          <key>NSExtensionActivationSupportsMovieWithMaxCount</key>
-          <integer>20</integer>
-          <key>NSExtensionActivationSupportsFileWithMaxCount</key>
-          <integer>50</integer>
-        </dict>
+        <string>TRUEPREDICATE</string>
       </dict>
       <key>NSExtensionPointIdentifier</key>
       <string>com.apple.share-services</string>

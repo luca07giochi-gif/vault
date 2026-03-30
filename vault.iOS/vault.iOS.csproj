@@ -29,6 +29,7 @@
     <ProjectReference Include="..\vault.iOS.Shared\vault.iOS.Shared.csproj" />
     <ProjectReference Include="..\vault.iOS.ShareExtension\vault.iOS.ShareExtension.csproj">
       <IsAppExtension>true</IsAppExtension>
+      <IsWatchApp>false</IsWatchApp>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
   </ItemGroup>
