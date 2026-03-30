@@ -26,10 +26,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
@@ -57,7 +57,7 @@ jobs:
 
       - name: Upload iOS publish binlog
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ios-publish-binlog
           path: publish-ios.binlog
@@ -65,7 +65,7 @@ jobs:
 
       - name: Upload iOS publish text log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ios-publish-log
           path: publish-ios.log
@@ -85,7 +85,7 @@ jobs:
           echo "IPA: $IPA_PATH"
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: vault-ios-ipa
           path: ${{ steps.locate.outputs.ipa_path }}

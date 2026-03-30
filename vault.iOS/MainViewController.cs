@@ -3890,15 +3890,15 @@ namespace vault.iOS
             try
             {
                 CGRect bounded = new CGRect(
-                    Math.Max(0f, cropRect.X),
-                    Math.Max(0f, cropRect.Y),
-                    Math.Max(1f, cropRect.Width),
-                    Math.Max(1f, cropRect.Height));
+                    (nfloat)Math.Max(0d, (double)cropRect.X),
+                    (nfloat)Math.Max(0d, (double)cropRect.Y),
+                    (nfloat)Math.Max(1d, (double)cropRect.Width),
+                    (nfloat)Math.Max(1d, (double)cropRect.Height));
 
                 nfloat maxWidth = normalized.Size.Width - bounded.X;
                 nfloat maxHeight = normalized.Size.Height - bounded.Y;
-                bounded.Width = Math.Max(1f, Math.Min(bounded.Width, maxWidth));
-                bounded.Height = Math.Max(1f, Math.Min(bounded.Height, maxHeight));
+                bounded.Width = (nfloat)Math.Max(1d, Math.Min((double)bounded.Width, (double)maxWidth));
+                bounded.Height = (nfloat)Math.Max(1d, Math.Min((double)bounded.Height, (double)maxHeight));
 
                 using var renderer = new UIGraphicsImageRenderer(bounded.Size);
                 UIImage rendered = renderer.CreateImage(_ =>
@@ -5224,7 +5224,7 @@ namespace vault.iOS
                     0f,
                     insets.Top,
                     bounds.Width,
-                    Math.Max(0f, toolbarY - insets.Top - 12f));
+                    (nfloat)Math.Max(0d, (double)(toolbarY - insets.Top - 12f)));
 
                 _toolbarBackground!.Frame = new CGRect(16f, toolbarY, bounds.Width - 32f, toolbarHeight);
                 _toolbarStack!.Frame = _toolbarBackground.ContentView.Bounds.Inset(10f, 10f);
@@ -5336,11 +5336,11 @@ namespace vault.iOS
                     null,
                     UIAlertControllerStyle.ActionSheet);
 
-                sheet.AddAction(UIAlertAction.Create("Sovrascrivi originale", UIAlertActionStyle.Default, _ =>
+                sheet.AddAction(UIAlertAction.Create("Sovrascrivi originale", UIAlertActionStyle.Default, __ =>
                 {
                     _ = SaveChangesAsync(overwrite: true);
                 }));
-                sheet.AddAction(UIAlertAction.Create("Salva copia", UIAlertActionStyle.Default, _ =>
+                sheet.AddAction(UIAlertAction.Create("Salva copia", UIAlertActionStyle.Default, __ =>
                 {
                     _ = SaveChangesAsync(overwrite: false);
                 }));
@@ -5548,8 +5548,8 @@ namespace vault.iOS
                 _displayedImageFrame = GetAspectFitFrame(_image.Size, _previewContainer.Bounds);
                 if (!_cropInitialized)
                 {
-                    nfloat insetX = Math.Min(24f, _displayedImageFrame.Width * 0.12f);
-                    nfloat insetY = Math.Min(24f, _displayedImageFrame.Height * 0.12f);
+                    nfloat insetX = (nfloat)Math.Min(24d, (double)_displayedImageFrame.Width * 0.12d);
+                    nfloat insetY = (nfloat)Math.Min(24d, (double)_displayedImageFrame.Height * 0.12d);
                     _cropRect = _displayedImageFrame.Inset(insetX, insetY);
                     _cropInitialized = true;
                 }
@@ -5629,8 +5629,8 @@ namespace vault.iOS
             {
                 nfloat right = start.GetMaxX();
                 nfloat bottom = start.GetMaxY();
-                nfloat left = Math.Max(_displayedImageFrame.X, Math.Min(start.X + translation.X, right - MinCropSize));
-                nfloat top = Math.Max(_displayedImageFrame.Y, Math.Min(start.Y + translation.Y, bottom - MinCropSize));
+                nfloat left = (nfloat)Math.Max((double)_displayedImageFrame.X, Math.Min((double)(start.X + translation.X), (double)(right - MinCropSize)));
+                nfloat top = (nfloat)Math.Max((double)_displayedImageFrame.Y, Math.Min((double)(start.Y + translation.Y), (double)(bottom - MinCropSize)));
                 return new CGRect(left, top, right - left, bottom - top);
             }
 
@@ -5638,8 +5638,8 @@ namespace vault.iOS
             {
                 nfloat left = start.X;
                 nfloat bottom = start.GetMaxY();
-                nfloat right = Math.Min(_displayedImageFrame.GetMaxX(), Math.Max(start.GetMaxX() + translation.X, left + MinCropSize));
-                nfloat top = Math.Max(_displayedImageFrame.Y, Math.Min(start.Y + translation.Y, bottom - MinCropSize));
+                nfloat right = (nfloat)Math.Min((double)_displayedImageFrame.GetMaxX(), Math.Max((double)(start.GetMaxX() + translation.X), (double)(left + MinCropSize)));
+                nfloat top = (nfloat)Math.Max((double)_displayedImageFrame.Y, Math.Min((double)(start.Y + translation.Y), (double)(bottom - MinCropSize)));
                 return new CGRect(left, top, right - left, bottom - top);
             }
 
@@ -5647,8 +5647,8 @@ namespace vault.iOS
             {
                 nfloat right = start.GetMaxX();
                 nfloat top = start.Y;
-                nfloat left = Math.Max(_displayedImageFrame.X, Math.Min(start.X + translation.X, right - MinCropSize));
-                nfloat bottom = Math.Min(_displayedImageFrame.GetMaxY(), Math.Max(start.GetMaxY() + translation.Y, top + MinCropSize));
+                nfloat left = (nfloat)Math.Max((double)_displayedImageFrame.X, Math.Min((double)(start.X + translation.X), (double)(right - MinCropSize)));
+                nfloat bottom = (nfloat)Math.Min((double)_displayedImageFrame.GetMaxY(), Math.Max((double)(start.GetMaxY() + translation.Y), (double)(top + MinCropSize)));
                 return new CGRect(left, top, right - left, bottom - top);
             }
 
@@ -5656,19 +5656,19 @@ namespace vault.iOS
             {
                 nfloat left = start.X;
                 nfloat top = start.Y;
-                nfloat right = Math.Min(_displayedImageFrame.GetMaxX(), Math.Max(start.GetMaxX() + translation.X, left + MinCropSize));
-                nfloat bottom = Math.Min(_displayedImageFrame.GetMaxY(), Math.Max(start.GetMaxY() + translation.Y, top + MinCropSize));
+                nfloat right = (nfloat)Math.Min((double)_displayedImageFrame.GetMaxX(), Math.Max((double)(start.GetMaxX() + translation.X), (double)(left + MinCropSize)));
+                nfloat bottom = (nfloat)Math.Min((double)_displayedImageFrame.GetMaxY(), Math.Max((double)(start.GetMaxY() + translation.Y), (double)(top + MinCropSize)));
                 return new CGRect(left, top, right - left, bottom - top);
             }
 
             private CGRect ClampMovedRect(CGRect rect, CGRect bounds)
             {
-                nfloat width = Math.Min(rect.Width, bounds.Width);
-                nfloat height = Math.Min(rect.Height, bounds.Height);
+                nfloat width = (nfloat)Math.Min((double)rect.Width, (double)bounds.Width);
+                nfloat height = (nfloat)Math.Min((double)rect.Height, (double)bounds.Height);
                 nfloat maxX = bounds.GetMaxX() - width;
                 nfloat maxY = bounds.GetMaxY() - height;
-                nfloat x = Math.Max(bounds.X, Math.Min(rect.X, maxX));
-                nfloat y = Math.Max(bounds.Y, Math.Min(rect.Y, maxY));
+                nfloat x = (nfloat)Math.Max((double)bounds.X, Math.Min((double)rect.X, (double)maxX));
+                nfloat y = (nfloat)Math.Max((double)bounds.Y, Math.Min((double)rect.Y, (double)maxY));
                 return new CGRect(x, y, width, height);
             }
 
@@ -5687,10 +5687,10 @@ namespace vault.iOS
                 CGRect imageFrame = _displayedImageFrame;
                 CGRect crop = _cropRect;
 
-                _topShade.Frame = new CGRect(imageFrame.X, imageFrame.Y, imageFrame.Width, Math.Max(0f, crop.Y - imageFrame.Y));
-                _bottomShade.Frame = new CGRect(imageFrame.X, crop.GetMaxY(), imageFrame.Width, Math.Max(0f, imageFrame.GetMaxY() - crop.GetMaxY()));
-                _leftShade.Frame = new CGRect(imageFrame.X, crop.Y, Math.Max(0f, crop.X - imageFrame.X), crop.Height);
-                _rightShade.Frame = new CGRect(crop.GetMaxX(), crop.Y, Math.Max(0f, imageFrame.GetMaxX() - crop.GetMaxX()), crop.Height);
+                _topShade.Frame = new CGRect(imageFrame.X, imageFrame.Y, imageFrame.Width, (nfloat)Math.Max(0d, (double)(crop.Y - imageFrame.Y)));
+                _bottomShade.Frame = new CGRect(imageFrame.X, crop.GetMaxY(), imageFrame.Width, (nfloat)Math.Max(0d, (double)(imageFrame.GetMaxY() - crop.GetMaxY())));
+                _leftShade.Frame = new CGRect(imageFrame.X, crop.Y, (nfloat)Math.Max(0d, (double)(crop.X - imageFrame.X)), crop.Height);
+                _rightShade.Frame = new CGRect(crop.GetMaxX(), crop.Y, (nfloat)Math.Max(0d, (double)(imageFrame.GetMaxX() - crop.GetMaxX())), crop.Height);
                 _cropBorder.Frame = crop;
 
                 PositionHandle(_topLeftHandle, crop.X, crop.Y);
@@ -5735,7 +5735,7 @@ namespace vault.iOS
                 if (contentSize.Width <= 0f || contentSize.Height <= 0f || bounds.Width <= 0f || bounds.Height <= 0f)
                     return CGRect.Empty;
 
-                nfloat scale = Math.Min(bounds.Width / contentSize.Width, bounds.Height / contentSize.Height);
+                nfloat scale = (nfloat)Math.Min((double)(bounds.Width / contentSize.Width), (double)(bounds.Height / contentSize.Height));
                 nfloat width = contentSize.Width * scale;
                 nfloat height = contentSize.Height * scale;
                 nfloat x = bounds.X + ((bounds.Width - width) / 2f);
