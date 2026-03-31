@@ -232,6 +232,21 @@ namespace vault.iOS.ShareExtension
                 return;
             }
 
+            // Ricaricare i vault recenti in caso fossero stati aggiunti dopo il primo caricamento
+            _recentVaults.Clear();
+            _recentVaults.AddRange(store.LoadRecentVaults());
+            if (_recentVaults.Count == 0)
+            {
+                ShowError("Nessun vault disponibile. Apri almeno un vault nell'app principale.");
+                return;
+            }
+
+            // Se non c'era una selezione, selezionare il primo
+            if (string.IsNullOrWhiteSpace(_selectedVaultId) && _recentVaults.Count > 0)
+                _selectedVaultId = _recentVaults.First().VaultId;
+
+            _tableView?.ReloadData();
+
             RecentVaultRecord? selectedVault = _recentVaults.FirstOrDefault(vault =>
                 string.Equals(vault.VaultId, _selectedVaultId, StringComparison.OrdinalIgnoreCase));
             if (selectedVault == null)
