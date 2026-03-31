@@ -96,6 +96,7 @@ namespace vault.iOS
         private UIView? _pathTitleContainer;
         private UIButton? _pathTitleButton;
         private UIButton? _pathNavigateUpButton;
+        private UIButton? _settingsGearButton;
         private UILongPressGestureRecognizer? _tableLongPressRecognizer;
         private UILongPressGestureRecognizer? _collectionLongPressRecognizer;
 
@@ -537,7 +538,14 @@ namespace vault.iOS
             _pathTitleContainer.AddSubview(_pathTitleButton);
             NavigationItem.TitleView = _pathTitleContainer;
             NavigationItem.LeftBarButtonItem = null;
-            NavigationItem.RightBarButtonItems = Array.Empty<UIBarButtonItem>();
+
+            _settingsGearButton = UIButton.FromType(UIButtonType.System);
+            _settingsGearButton.SetImage(UIImage.GetSystemImage("gearshape.fill"), UIControlState.Normal);
+            _settingsGearButton.TintColor = UIColor.FromRGB(10, 132, 255);
+            _settingsGearButton.TouchUpInside += (_, _) => OpenManageRecentVaultsMenu();
+            _settingsGearButton.Hidden = true;
+
+            NavigationItem.RightBarButtonItem = new UIBarButtonItem(_settingsGearButton);
         }
 
         private void UpdateUiState()
@@ -615,6 +623,8 @@ namespace vault.iOS
                 _openVaultCenteredButton.Hidden = hasVault;
             if (_createVaultCenteredButton != null)
                 _createVaultCenteredButton.Hidden = hasVault;
+            if (_settingsGearButton != null)
+                _settingsGearButton.Hidden = hasVault;
 
             if (!hasVault)
             {
@@ -1283,6 +1293,111 @@ namespace vault.iOS
 
             RecentVaultRecord saved = store.UpsertRecentVault(record);
             _currentVaultRecentId = saved.VaultId;
+        }
+
+        private void OpenManageRecentVaultsMenu()
+        {
+            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: true);
+            if (store == null)
+                return;
+
+            IReadOnlyList<RecentVaultRecord> recentVaults = store.LoadRecentVaults();
+            if (recentVaults.Count == 0)
+            {
+                ShowSimpleAlert("Nessun vault recente", "Apri un vault per renderlo disponibile nella Share Extension.");
+                return;
+            }
+
+            UIAlertController alert = UIAlertController.Create(
+                "Gestisci vault per la condivisione",
+                $"{recentVaults.Count} vault disponibili",
+                UIAlertControllerStyle.Alert);
+
+            foreach (RecentVaultRecord vault in recentVaults)
+            {
+                string displayName = vault.DisplayName ?? "Vault";
+                string vaultPath = vault.LastKnownPath ?? "(percorso sconosciuto)";
+                string actionTitle = $"{displayName}\n{vaultPath}";
+
+                alert.AddAction(UIAlertAction.Create(
+                    actionTitle,
+                    UIAlertActionStyle.Default,
+                    _ => PromptVaultActions(vault, store)));
+            }
+
+            alert.AddAction(UIAlertAction.Create("Chiudi", UIAlertActionStyle.Cancel, null));
+
+            PresentViewController(alert, true, null);
+        }
+
+        private void PromptVaultActions(RecentVaultRecord vault, SharedVaultQueueStore store)
+        {
+            UIAlertController actionAlert = UIAlertController.Create(
+                vault.DisplayName ?? "Vault",
+                null,
+                UIAlertControllerStyle.ActionSheet);
+
+            actionAlert.AddAction(UIAlertAction.Create(
+                "Rimuovi dalla Share Extension",
+                UIAlertActionStyle.Destructive,
+                _ => RemoveVaultFromRecents(vault, store)));
+
+            actionAlert.AddAction(UIAlertAction.Create(
+                "Annulla",
+                UIAlertActionStyle.Cancel,
+                null));
+
+            PresentViewController(actionAlert, true, null);
+        }
+
+        private void RemoveVaultFromRecents(RecentVaultRecord vault, SharedVaultQueueStore store)
+        {
+            SharedVaultQueueStore? freshStore = TryGetSharedQueueStore(showErrorIfUnavailable: false);
+            if (freshStore == null)
+                return;
+
+            IReadOnlyList<RecentVaultRecord> allVaults = freshStore.LoadRecentVaults();
+            List<RecentVaultRecord> filtered = allVaults
+                .Where(v => !string.Equals(v.VaultId, vault.VaultId, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            // Riscrivi il file senza questo vault
+            // Purtroppo SharedVaultQueueStore non ha un metodo DeleteVault, quindi dovremo
+            // ricaricare e salvare manualmente
+            try
+            {
+                // Leggi il file recenti
+                string recentVaultsPath = Path.Combine(freshStore.RootPath, "recent-vaults.json");
+                
+                // Crea un documento con i vault filtrati
+                var document = new
+                {
+                    schemaVersion = 1,
+                    vaults = filtered
+                };
+
+                System.Text.Json.JsonSerializerOptions options = new()
+                {
+                    WriteIndented = true,
+                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+                };
+
+                string json = System.Text.Json.JsonSerializer.Serialize(document, options);
+                File.WriteAllText(recentVaultsPath, json);
+
+                ShowSimpleAlert("Rimosso", $"{vault.DisplayName} non sarà più disponibile nella Share Extension.");
+            }
+            catch (Exception ex)
+            {
+                ShowSimpleAlert("Errore", $"Impossibile rimuovere il vault: {ex.Message}");
+            }
+        }
+
+        private void ShowSimpleAlert(string title, string message)
+        {
+            UIAlertController alert = UIAlertController.Create(title, message, UIAlertControllerStyle.Alert);
+            alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, null));
+            PresentViewController(alert, true, null);
         }
 
         private void PromptPendingImportsForCurrentVaultIfNeeded()
