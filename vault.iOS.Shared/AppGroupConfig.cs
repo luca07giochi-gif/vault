@@ -1,5 +1,3 @@
-using Foundation;
-
 namespace vault.iOS.Shared
 {
     public static class AppGroupConfig
@@ -8,12 +6,11 @@ namespace vault.iOS.Shared
         
         /// <summary>
         /// Restituisce il percorso root per i dati condivisi tra app e share extension.
-        /// Su configurazioni con App Groups disponibile, usa il container condiviso.
-        /// Altrimenti usa una cartella nella temp directory accessibile da entrambi.
+        /// Usa una cartella nella temp directory accessibile da entrambi.
         /// </summary>
         public static string GetSharedVaultQueuePath()
         {
-            string tempDir = NSTemporaryDirectory();
+            string tempDir = Path.GetTempPath();
             return Path.Combine(tempDir, "VaultSharedQueue");
         }
     }
