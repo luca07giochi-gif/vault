@@ -201,10 +201,9 @@ namespace vault.iOS.ShareExtension
 
             try
             {
-                NSUrl? containerUrl = NSFileManager.DefaultManager.GetContainerUrl(AppGroupConfig.Identifier);
-                string? rootPath = containerUrl?.Path;
+                string rootPath = AppGroupConfig.GetSharedVaultQueuePath();
                 if (string.IsNullOrWhiteSpace(rootPath))
-                    throw new InvalidOperationException("Contenitore condiviso non disponibile.");
+                    throw new InvalidOperationException("Impossibile accedere al percorso di condivisione.");
 
                 _store = new SharedVaultQueueStore(rootPath);
                 return _store;
