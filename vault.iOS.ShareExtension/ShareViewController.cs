@@ -507,9 +507,10 @@ namespace vault.iOS.ShareExtension
                     NSData data = NSData.FromArray(Convert.FromBase64String(vault.BookmarkDataBase64));
                     bool isStale;
                     NSError? error;
+                    // iOS risolve il bookmark senza usare le opzioni security-scoped del binding macOS.
                     NSUrl? resolved = NSUrl.FromBookmarkData(
                         data,
-                        NSUrlBookmarkResolutionOptions.WithSecurityScope,
+                        0,
                         null,
                         out isStale,
                         out error);

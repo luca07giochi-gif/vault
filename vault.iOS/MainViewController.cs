@@ -656,10 +656,17 @@ namespace vault.iOS
             if (_session == null)
             {
                 NavigationItem.LeftBarButtonItem = null;
-                
-                // Mostra il pulsante ingranaggio per gestire i vault recenti
-                UIBarButtonItem gearButton = new UIBarButtonItem(_settingsGearButton);
-                NavigationItem.RightBarButtonItems = new[] { gearButton };
+
+                if (_settingsGearButton != null)
+                {
+                    UIBarButtonItem gearButton = new UIBarButtonItem(_settingsGearButton);
+                    NavigationItem.RightBarButtonItems = new[] { gearButton };
+                }
+                else
+                {
+                    NavigationItem.RightBarButtonItems = null;
+                }
+
                 return;
             }
 
@@ -1364,8 +1371,9 @@ namespace vault.iOS
             try
             {
                 NSError? bookmarkError;
+                // iOS non supporta le opzioni security-scoped del binding .NET usate su macOS.
                 NSData bookmarkData = vaultUrl.CreateBookmarkData(
-                    NSUrlBookmarkCreationOptions.WithSecurityScope,
+                    0,
                     null,
                     null,
                     out bookmarkError);
