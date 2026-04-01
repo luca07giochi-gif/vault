@@ -266,7 +266,18 @@ namespace vault.iOS.ShareExtension
             NSUrl? vaultUrl = null;
             try
             {
-                vaultUrl = directVaultUrl ?? ResolveVaultUrl(selectedVault);
+                vaultUrl = directVaultUrl;
+                if (vaultUrl == null && RequiresManualVaultSelection(selectedVault))
+                {
+                    vaultUrl = await PromptManualVaultSelectionAsync();
+                    if (vaultUrl == null)
+                    {
+                        SetBusy(false, string.Empty);
+                        return;
+                    }
+                }
+
+                vaultUrl ??= ResolveVaultUrl(selectedVault);
                 session = await Task.Run(() => OpenVaultReader(vaultUrl, password));
             }
             catch (Exception ex)
@@ -580,6 +591,16 @@ namespace vault.iOS.ShareExtension
             throw new InvalidOperationException("Questo vault non e disponibile al momento. Aprilo di nuovo nell'app principale e riprova.");
         }
 
+        private static bool RequiresManualVaultSelection(RecentVaultRecord vault)
+        {
+            string? path = vault.LastKnownPath;
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            return path.Contains("/Containers/Data/Application/", StringComparison.OrdinalIgnoreCase) ||
+                   path.Contains("\\Containers\\Data\\Application\\", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password)
         {
             using var scope = new SecurityScopeAccess(fileUrl);
@@ -774,6 +795,12 @@ namespace vault.iOS.ShareExtension
 
         private void ShowError(string message)
         {
+            if (!string.IsNullOrWhiteSpace(message) &&
+                message.Contains("UnauthorizedAccess_IODenied", StringComparison.OrdinalIgnoreCase))
+            {
+                message = "Non posso modificare questo vault direttamente da qui. Seleziona di nuovo il file del vault con il pulsante \"Scegli vault\" e riprova.";
+            }
+
             UIAlertController alert = UIAlertController.Create(
                 "Operazione non riuscita",
                 string.IsNullOrWhiteSpace(message) ? "Errore sconosciuto." : message,
@@ -820,9 +847,7 @@ namespace vault.iOS.ShareExtension
                 RecentVaultRecord vault = _owner._recentVaults[indexPath.Row];
                 UIListContentConfiguration content = cell.DefaultContentConfiguration;
                 content.Text = string.IsNullOrWhiteSpace(vault.DisplayName) ? "Vault" : vault.DisplayName;
-                content.SecondaryText = string.IsNullOrWhiteSpace(vault.LastKnownPath)
-                    ? "Vault disponibile per la condivisione"
-                    : vault.LastKnownPath;
+                content.SecondaryText = BuildSecondaryText(vault);
                 cell.ContentConfiguration = content;
                 cell.Accessory = string.Equals(vault.VaultId, _owner._selectedVaultId, StringComparison.OrdinalIgnoreCase)
                     ? UITableViewCellAccessory.Checkmark
@@ -835,6 +860,17 @@ namespace vault.iOS.ShareExtension
                 tableView.DeselectRow(indexPath, true);
                 RecentVaultRecord vault = _owner._recentVaults[indexPath.Row];
                 _owner.SetSelectedVault(vault.VaultId);
+            }
+
+            private static string BuildSecondaryText(RecentVaultRecord vault)
+            {
+                if (RequiresManualVaultSelection(vault))
+                    return "Salvato dentro l'app. Ti verra chiesto di riselezionare il file prima dell'importazione.";
+
+                if (string.IsNullOrWhiteSpace(vault.LastKnownPath))
+                    return "Vault disponibile per la condivisione";
+
+                return vault.LastKnownPath;
             }
         }
 
