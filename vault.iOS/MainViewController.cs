@@ -107,6 +107,7 @@ namespace vault.iOS
         private GalleryMultiPickerDelegate? _galleryMultiPickerDelegate;
         private string? _activePreviewTemporaryPath;
         private SharedVaultQueueStore? _sharedQueueStore;
+        private string? _sharedQueueRootPath;
         private string? _currentVaultRecentId;
         private bool _pendingImportPromptVisible;
 
@@ -786,6 +787,8 @@ namespace vault.iOS
             _session?.Dispose();
             _session = null;
             _vaultUrl = null;
+            _sharedQueueStore = null;
+            _sharedQueueRootPath = null;
             _sessionPassword = string.Empty;
             _currentFolder = string.Empty;
             _currentVaultRecentId = null;
@@ -1252,18 +1255,27 @@ namespace vault.iOS
             ReloadFolderItems();
         }
 
-        private SharedVaultQueueStore? TryGetSharedQueueStore(bool showErrorIfUnavailable)
+        private SharedVaultQueueStore? TryGetCurrentVaultQueueStore(bool showErrorIfUnavailable)
         {
-            if (_sharedQueueStore != null)
-                return _sharedQueueStore;
+            if (_vaultUrl == null)
+            {
+                if (showErrorIfUnavailable)
+                    ShowError("Apri prima un vault.");
+                return null;
+            }
 
             try
             {
-                string rootPath = AppGroupConfig.GetSharedVaultQueuePath();
+                string rootPath = VaultPendingImportLocator.GetQueueRootPath(_vaultUrl.Path);
                 if (string.IsNullOrWhiteSpace(rootPath))
                     throw new InvalidOperationException("Impossibile accedere al percorso di condivisione.");
 
+                if (_sharedQueueStore != null &&
+                    string.Equals(_sharedQueueRootPath, rootPath, StringComparison.OrdinalIgnoreCase))
+                    return _sharedQueueStore;
+
                 _sharedQueueStore = new SharedVaultQueueStore(rootPath);
+                _sharedQueueRootPath = rootPath;
                 return _sharedQueueStore;
             }
             catch (Exception ex)
@@ -1298,8 +1310,8 @@ namespace vault.iOS
                 IsPinned = existing?.IsPinned ?? false
             };
 
-            RecentVaultRecord saved = ShareVaultRegistryBridge.UpsertAppManagedVault(record);
-            _currentVaultRecentId = saved.VaultId;
+            ShareVaultRegistryBridge.UpsertAppManagedVault(record);
+            _currentVaultRecentId = VaultPendingImportLocator.GetVaultId(vaultPath);
         }
 
         private void OpenManageRecentVaultsMenu()
@@ -1399,11 +1411,11 @@ namespace vault.iOS
 
         private void PromptPendingImportsForCurrentVaultIfNeeded()
         {
-            if (_session == null || string.IsNullOrWhiteSpace(_currentVaultRecentId) || _pendingImportPromptVisible)
+            if (_session == null || _vaultUrl == null || string.IsNullOrWhiteSpace(_currentVaultRecentId) || _pendingImportPromptVisible)
                 return;
 
             string currentVaultRecentId = _currentVaultRecentId;
-            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: false);
+            SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: false);
             if (store == null)
                 return;
 
@@ -1413,8 +1425,8 @@ namespace vault.iOS
 
             _pendingImportPromptVisible = true;
             string message = aggregate.JobCount <= 1
-                ? $"Ci sono {aggregate.FileCount} file in attesa per questo dispositivo."
-                : $"Ci sono {aggregate.FileCount} file in attesa per questo dispositivo in {aggregate.JobCount} invii.";
+                ? $"C'e {aggregate.FileCount} file in attesa per questo vault."
+                : $"Ci sono {aggregate.FileCount} file in attesa per questo vault in {aggregate.JobCount} invii.";
 
             UIAlertController alert = UIAlertController.Create(
                 "File in attesa",
@@ -1458,7 +1470,7 @@ namespace vault.iOS
             if (jobIds == null || jobIds.Length == 0)
                 return;
 
-            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: true);
+            SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: true);
             if (store == null)
                 return;
 
@@ -1488,7 +1500,7 @@ namespace vault.iOS
             if (string.IsNullOrWhiteSpace(_currentVaultRecentId))
                 return;
 
-            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: true);
+            SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: true);
             if (store == null)
                 return;
 
@@ -2347,6 +2359,8 @@ namespace vault.iOS
                 _session?.Dispose();
                 _session = reader;
                 _vaultUrl = vaultUrl;
+                _sharedQueueStore = null;
+                _sharedQueueRootPath = null;
                 _sessionPassword = password;
                 _currentFolder = string.Empty;
                 _isSelectionMode = false;
