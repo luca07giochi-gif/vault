@@ -1,6 +1,7 @@
 using CoreGraphics;
 using Foundation;
 using UIKit;
+using vault.Core.Domain;
 using vault.iOS.Shared;
 
 namespace vault.iOS.ShareExtension
@@ -9,6 +10,9 @@ namespace vault.iOS.ShareExtension
     public sealed class ShareViewController : UIViewController
     {
         private const string CellId = "RecentVaultCell";
+        private const long LegacyAutoUpgradeThresholdBytes = 180L * 1024 * 1024;
+        private const long LegacyUltraUpgradeThresholdBytes = 700L * 1024 * 1024;
+        private const int MaxDestinationActions = 40;
         private static readonly UIColor BackgroundColor = UIColor.White;
         private static readonly UIColor PrimaryTextColor = UIColor.Black;
         private static readonly UIColor SecondaryTextColor = UIColor.FromRGB(110, 110, 115);
@@ -22,7 +26,6 @@ namespace vault.iOS.ShareExtension
         private UIActivityIndicatorView? _busyIndicator;
         private UILabel? _busyLabel;
         private string? _selectedVaultId;
-        private SharedVaultQueueStore? _store;
         private bool _isBusy;
 
         public override void ViewDidLoad()
@@ -76,9 +79,9 @@ namespace vault.iOS.ShareExtension
 
             _confirmButton = UIButton.FromType(UIButtonType.System);
             _confirmButton.TranslatesAutoresizingMaskIntoConstraints = false;
-            _confirmButton.SetTitle("Metti in coda", UIControlState.Normal);
+            _confirmButton.SetTitle("Importa", UIControlState.Normal);
             _confirmButton.TitleLabel!.Font = UIFont.BoldSystemFontOfSize(16f);
-            _confirmButton.TouchUpInside += async (_, _) => await QueueIncomingFilesAsync();
+            _confirmButton.TouchUpInside += async (_, _) => await ImportIntoSelectedVaultAsync();
 
             _busyIndicator = new UIActivityIndicatorView(UIActivityIndicatorViewStyle.Medium)
             {
@@ -91,7 +94,9 @@ namespace vault.iOS.ShareExtension
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 Font = UIFont.SystemFontOfSize(14f),
                 TextColor = SecondaryTextColor,
-                Hidden = true
+                Hidden = true,
+                Lines = 2,
+                TextAlignment = UITextAlignment.Center
             };
 
             UIStackView buttonStack = new()
@@ -140,7 +145,8 @@ namespace vault.iOS.ShareExtension
                 _busyIndicator.CenterXAnchor.ConstraintEqualTo(View.CenterXAnchor),
 
                 _busyLabel.TopAnchor.ConstraintEqualTo(_busyIndicator.BottomAnchor, 6f),
-                _busyLabel.CenterXAnchor.ConstraintEqualTo(View.CenterXAnchor),
+                _busyLabel.LeadingAnchor.ConstraintEqualTo(titleLabel.LeadingAnchor),
+                _busyLabel.TrailingAnchor.ConstraintEqualTo(titleLabel.TrailingAnchor),
                 _busyLabel.BottomAnchor.ConstraintLessThanOrEqualTo(View.SafeAreaLayoutGuide.BottomAnchor, -6f)
             });
         }
@@ -153,20 +159,13 @@ namespace vault.iOS.ShareExtension
                 _summaryLabel.Text = providerCount switch
                 {
                     <= 0 => "Nessun file rilevato nella condivisione.",
-                    1 => "1 file pronto per essere aggiunto in coda.",
-                    _ => $"{providerCount} file pronti per essere aggiunti in coda."
+                    1 => "1 file pronto per essere importato nel vault selezionato.",
+                    _ => $"{providerCount} file pronti per essere importati nel vault selezionato."
                 };
             }
 
-            SharedVaultQueueStore? store = GetStore(allowAlertOnFailure: true);
-            if (store == null)
-            {
-                UpdateUiState();
-                return;
-            }
-
             _recentVaults.Clear();
-            _recentVaults.AddRange(store.LoadRecentVaults());
+            _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
             _selectedVaultId = _recentVaults.FirstOrDefault()?.VaultId;
             _tableView?.ReloadData();
             UpdateUiState();
@@ -194,54 +193,27 @@ namespace vault.iOS.ShareExtension
             return providers;
         }
 
-        private SharedVaultQueueStore? GetStore(bool allowAlertOnFailure)
-        {
-            if (_store != null)
-                return _store;
-
-            try
-            {
-                string rootPath = AppGroupConfig.GetSharedVaultQueuePath();
-                if (string.IsNullOrWhiteSpace(rootPath))
-                    throw new InvalidOperationException("Impossibile accedere al percorso di condivisione.");
-
-                _store = new SharedVaultQueueStore(rootPath);
-                return _store;
-            }
-            catch (Exception ex)
-            {
-                if (allowAlertOnFailure)
-                    ShowError(ex.Message);
-                return null;
-            }
-        }
-
-        private async Task QueueIncomingFilesAsync()
+        private async Task ImportIntoSelectedVaultAsync()
         {
             if (_isBusy)
-                return;
-
-            SharedVaultQueueStore? store = GetStore(allowAlertOnFailure: true);
-            if (store == null)
                 return;
 
             IReadOnlyList<NSItemProvider> providers = GetIncomingProviders();
             if (providers.Count == 0)
             {
-                ShowError("Nessun file da mettere in coda.");
+                ShowError("Nessun file da importare.");
                 return;
             }
 
-            // Ricaricare i vault recenti in caso fossero stati aggiunti dopo il primo caricamento
             _recentVaults.Clear();
-            _recentVaults.AddRange(store.LoadRecentVaults());
+            _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
             if (_recentVaults.Count == 0)
             {
-                ShowError("Nessun vault disponibile. Apri almeno un vault nell'app principale.");
+                ShowError("Nessun vault disponibile. Apri l'app principale, apri un vault e aggiorna l'elenco dall'ingranaggio.");
+                UpdateUiState();
                 return;
             }
 
-            // Se non c'era una selezione, selezionare il primo
             if (string.IsNullOrWhiteSpace(_selectedVaultId) && _recentVaults.Count > 0)
                 _selectedVaultId = _recentVaults.First().VaultId;
 
@@ -251,53 +223,183 @@ namespace vault.iOS.ShareExtension
                 string.Equals(vault.VaultId, _selectedVaultId, StringComparison.OrdinalIgnoreCase));
             if (selectedVault == null)
             {
-                ShowError("Seleziona un vault recente.");
+                ShowError("Seleziona un vault.");
                 return;
             }
 
-            PendingImportJob job = store.CreatePendingJob(selectedVault.VaultId, selectedVault.DisplayName);
-            SetBusy(true, "Salvataggio in coda...");
+            string? password = await PromptPasswordAsync(selectedVault.DisplayName);
+            if (password == null)
+                return;
+
+            SetBusy(true, "Apertura vault...");
+
+            VaultPortableReader? session = null;
+            NSUrl? vaultUrl = null;
+            try
+            {
+                vaultUrl = ResolveVaultUrl(selectedVault);
+                session = await Task.Run(() => OpenVaultReader(vaultUrl, password));
+            }
+            catch (Exception ex)
+            {
+                SetBusy(false, string.Empty);
+                ShowError(ex.Message);
+                session?.Dispose();
+                return;
+            }
+
+            SetBusy(false, string.Empty);
 
             try
             {
+                string? destination = await PromptDestinationAsync(session);
+                if (destination == null)
+                    return;
+
+                await ImportProvidersIntoVaultAsync(selectedVault, vaultUrl, session, providers, destination);
+            }
+            finally
+            {
+                session.Dispose();
+            }
+        }
+
+        private async Task ImportProvidersIntoVaultAsync(
+            RecentVaultRecord selectedVault,
+            NSUrl vaultUrl,
+            VaultPortableReader session,
+            IReadOnlyList<NSItemProvider> providers,
+            string destinationPath)
+        {
+            List<string> temporaryPaths = new();
+            SetBusy(true, "Importazione nel vault...");
+
+            try
+            {
+                int completed = 0;
                 foreach (NSItemProvider provider in providers)
                 {
-                    PendingImportItem item = await StageProviderAsync(store, job.JobId, provider);
-                    job.Items.Add(item);
+                    string tempPath = await LoadProviderToTempPathAsync(provider);
+                    temporaryPaths.Add(tempPath);
+
+                    string currentPath = tempPath;
+                    await Task.Run(() => session.AddFileFromPath(currentPath, destinationPath));
+
+                    completed++;
+                    SetBusy(true, providers.Count == 1
+                        ? "Importazione nel vault..."
+                        : $"Importazione nel vault... ({completed}/{providers.Count})");
                 }
 
-                if (job.Items.Count == 0)
-                    throw new InvalidOperationException("Nessun file valido da mettere in coda.");
-
-                store.SavePendingJob(job);
+                PrepareSessionForPersist(session, selectedVault);
+                await Task.Run(() => PersistVaultToUrl(vaultUrl, session));
                 await CompleteAndCloseAsync();
             }
             catch (Exception ex)
             {
-                try
-                {
-                    store.DeleteJobs(new[] { job.JobId });
-                }
-                catch
-                {
-                    // Best effort cleanup.
-                }
-
                 ShowError(ex.Message);
             }
             finally
             {
                 SetBusy(false, string.Empty);
+                foreach (string path in temporaryPaths)
+                    TryDeletePath(path);
             }
         }
 
-        private static Task<PendingImportItem> StageProviderAsync(SharedVaultQueueStore store, string jobId, NSItemProvider provider)
+        private static void PrepareSessionForPersist(VaultPortableReader session, RecentVaultRecord record)
+        {
+            if (session.StorageFormat != VaultStorageFormat.Legacy)
+                return;
+
+            long payloadBytes = EstimateSessionPayloadBytes(session);
+            if (payloadBytes < LegacyAutoUpgradeThresholdBytes)
+                return;
+
+            VaultStorageFormat targetFormat = payloadBytes >= LegacyUltraUpgradeThresholdBytes
+                ? VaultStorageFormat.Ultra
+                : VaultStorageFormat.Extended;
+
+            session.ChangeStorageFormat(targetFormat);
+            record.StorageFormat = targetFormat.ToString();
+        }
+
+        private static long EstimateSessionPayloadBytes(VaultPortableReader session)
+        {
+            long total = 0;
+            foreach (VaultFileItem item in session.Files)
+            {
+                if (item.IsFolder)
+                    continue;
+
+                long size = item.ContentLength;
+                if (size <= 0)
+                    continue;
+
+                total = checked(total + size);
+            }
+
+            return total;
+        }
+
+        private async Task<string?> PromptPasswordAsync(string? vaultName)
+        {
+            var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            UIAlertController alert = UIAlertController.Create(
+                "Password vault",
+                string.IsNullOrWhiteSpace(vaultName) ? "Inserisci la password del vault." : $"Inserisci la password di {vaultName}.",
+                UIAlertControllerStyle.Alert);
+
+            alert.AddTextField(field =>
+            {
+                field.Placeholder = "Password";
+                field.SecureTextEntry = true;
+                field.TextContentType = UITextContentType.Password;
+                field.AutocorrectionType = UITextAutocorrectionType.No;
+                field.AutocapitalizationType = UITextAutocapitalizationType.None;
+            });
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, _ => tcs.TrySetResult(null)));
+            alert.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, _ =>
+            {
+                string password = alert.TextFields?.FirstOrDefault()?.Text?.Trim() ?? string.Empty;
+                tcs.TrySetResult(password);
+            }));
+
+            PresentViewController(alert, true, null);
+            return await tcs.Task;
+        }
+
+        private async Task<string?> PromptDestinationAsync(VaultPortableReader session)
+        {
+            IReadOnlyList<string> folderPaths = session.GetAllFolderPaths()
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            UIAlertController sheet = UIAlertController.Create(
+                "Dove importare?",
+                folderPaths.Count > MaxDestinationActions ? "Mostrate le prime cartelle piu comuni." : null,
+                UIAlertControllerStyle.ActionSheet);
+
+            foreach (string folderPath in folderPaths.Take(MaxDestinationActions))
+            {
+                string label = string.IsNullOrWhiteSpace(folderPath) ? "/" : $"/{folderPath}";
+                sheet.AddAction(UIAlertAction.Create(label, UIAlertActionStyle.Default, _ => tcs.TrySetResult(folderPath)));
+            }
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, _ => tcs.TrySetResult(null)));
+            PresentViewController(sheet, true, null);
+            return await tcs.Task;
+        }
+
+        private static Task<string> LoadProviderToTempPathAsync(NSItemProvider provider)
         {
             string typeIdentifier = SelectPreferredTypeIdentifier(provider);
             if (string.IsNullOrWhiteSpace(typeIdentifier))
                 throw new InvalidOperationException("Tipo file non supportato.");
 
-            var tcs = new TaskCompletionSource<PendingImportItem>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             provider.LoadFileRepresentation(typeIdentifier, (url, error) =>
             {
                 if (error != null)
@@ -321,20 +423,10 @@ namespace vault.iOS.ShareExtension
                         return;
                     }
 
-                    string stagedFileName = BuildPreferredFileName(provider, sourcePath, typeIdentifier);
-                    string destinationPath = store.BuildUniqueStagedFilePath(jobId, stagedFileName);
+                    string preferredName = BuildPreferredFileName(provider, sourcePath, typeIdentifier);
+                    string destinationPath = CreateTemporaryImportPath(preferredName);
                     File.Copy(sourcePath, destinationPath, overwrite: true);
-
-                    FileInfo info = new(destinationPath);
-                    tcs.TrySetResult(new PendingImportItem
-                    {
-                        ItemId = Guid.NewGuid().ToString("N"),
-                        OriginalFileName = Path.GetFileName(destinationPath),
-                        StagedRelativePath = store.GetRelativePathForJob(jobId, destinationPath),
-                        ContentType = typeIdentifier,
-                        FileSize = info.Exists ? info.Length : 0,
-                        SourceHint = provider.SuggestedName
-                    });
+                    tcs.TrySetResult(destinationPath);
                 }
                 catch (Exception ex)
                 {
@@ -343,6 +435,14 @@ namespace vault.iOS.ShareExtension
             });
 
             return tcs.Task;
+        }
+
+        private static string CreateTemporaryImportPath(string originalFileName)
+        {
+            string extension = Path.GetExtension(originalFileName ?? string.Empty);
+            string runtimeRoot = Path.Combine(Path.GetTempPath(), "vault-ios-share-runtime");
+            Directory.CreateDirectory(runtimeRoot);
+            return Path.Combine(runtimeRoot, $"{Guid.NewGuid():N}{extension}");
         }
 
         private static string SelectPreferredTypeIdentifier(NSItemProvider provider)
@@ -390,16 +490,127 @@ namespace vault.iOS.ShareExtension
                 return ".pdf";
             if (typeIdentifier.Contains("zip", StringComparison.OrdinalIgnoreCase) ||
                 typeIdentifier.Contains("archive", StringComparison.OrdinalIgnoreCase))
-            {
                 return ".zip";
-            }
             if (typeIdentifier.Contains("movie", StringComparison.OrdinalIgnoreCase) ||
                 typeIdentifier.Contains("video", StringComparison.OrdinalIgnoreCase))
-            {
                 return ".mov";
-            }
 
             return ".dat";
+        }
+
+        private static NSUrl ResolveVaultUrl(RecentVaultRecord vault)
+        {
+            if (!string.IsNullOrWhiteSpace(vault.BookmarkDataBase64))
+            {
+                try
+                {
+                    NSData data = NSData.FromArray(Convert.FromBase64String(vault.BookmarkDataBase64));
+                    bool isStale;
+                    NSError? error;
+                    NSUrl? resolved = NSUrl.FromBookmarkData(
+                        data,
+                        NSUrlBookmarkResolutionOptions.WithSecurityScope,
+                        null,
+                        out isStale,
+                        out error);
+
+                    if (resolved != null && error == null)
+                        return resolved;
+                }
+                catch
+                {
+                    // Fallback below.
+                }
+            }
+
+            string? path = vault.LastKnownPath;
+            if (!string.IsNullOrWhiteSpace(path))
+                return NSUrl.FromFilename(path);
+
+            throw new InvalidOperationException("Questo vault non e disponibile per la condivisione. Aprilo di nuovo nell'app principale.");
+        }
+
+        private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password)
+        {
+            using var scope = new SecurityScopeAccess(fileUrl);
+
+            string? path = fileUrl.Path;
+            if (string.IsNullOrWhiteSpace(path))
+                throw new IOException("Percorso vault non valido.");
+
+            using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return VaultPortableReader.Open(stream, password, allowUltra: true);
+        }
+
+        private static void PersistVaultToUrl(NSUrl fileUrl, VaultPortableReader session)
+        {
+            using var scope = new SecurityScopeAccess(fileUrl);
+
+            string? path = fileUrl.Path;
+            if (string.IsNullOrWhiteSpace(path))
+                throw new IOException("Percorso vault non valido.");
+
+            string tempPath = CreateVaultWriteTempPathNearDestination(path);
+            try
+            {
+                using (FileStream output = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    session.SaveToStream(output);
+                    output.Flush(flushToDisk: true);
+                }
+
+                try
+                {
+                    File.Move(tempPath, path, overwrite: true);
+                }
+                catch
+                {
+                    File.Copy(tempPath, path, overwrite: true);
+                    File.Delete(tempPath);
+                }
+            }
+            finally
+            {
+                TryDeletePath(tempPath);
+            }
+        }
+
+        private static string CreateVaultWriteTempPathNearDestination(string destinationPath)
+        {
+            string fileName = Path.GetFileName(destinationPath);
+            string? destinationDirectory = Path.GetDirectoryName(destinationPath);
+            if (!string.IsNullOrWhiteSpace(destinationDirectory))
+            {
+                try
+                {
+                    Directory.CreateDirectory(destinationDirectory);
+                    return Path.Combine(destinationDirectory, $".{fileName}.{Guid.NewGuid():N}.tmp");
+                }
+                catch
+                {
+                    // Fallback below.
+                }
+            }
+
+            string runtimeRoot = Path.Combine(Path.GetTempPath(), "vault-ios-share-runtime");
+            Directory.CreateDirectory(runtimeRoot);
+            return Path.Combine(runtimeRoot, $"{Guid.NewGuid():N}.tmp");
+        }
+
+        private static void TryDeletePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch
+            {
+                // Best effort cleanup.
+            }
         }
 
         private async Task CompleteAndCloseAsync()
@@ -438,7 +649,9 @@ namespace vault.iOS.ShareExtension
             {
                 _emptyLabel.Hidden = hasRecentVaults;
                 if (!hasRecentVaults)
-                    _emptyLabel.Text = "Apri almeno un vault nell'app principale per farlo comparire qui.";
+                {
+                    _emptyLabel.Text = "Apri l'app principale, apri almeno un vault e gestisci l'elenco dall'ingranaggio in alto a destra.";
+                }
             }
 
             if (_tableView != null)
@@ -493,6 +706,24 @@ namespace vault.iOS.ShareExtension
             PresentViewController(alert, true, null);
         }
 
+        private sealed class SecurityScopeAccess : IDisposable
+        {
+            private readonly NSUrl _url;
+            private readonly bool _isAccessing;
+
+            public SecurityScopeAccess(NSUrl url)
+            {
+                _url = url;
+                _isAccessing = _url.StartAccessingSecurityScopedResource();
+            }
+
+            public void Dispose()
+            {
+                if (_isAccessing)
+                    _url.StopAccessingSecurityScopedResource();
+            }
+        }
+
         private sealed class RecentVaultSource : UITableViewSource
         {
             private readonly ShareViewController _owner;
@@ -514,7 +745,7 @@ namespace vault.iOS.ShareExtension
                 UIListContentConfiguration content = cell.DefaultContentConfiguration;
                 content.Text = string.IsNullOrWhiteSpace(vault.DisplayName) ? "Vault" : vault.DisplayName;
                 content.SecondaryText = string.IsNullOrWhiteSpace(vault.LastKnownPath)
-                    ? "Vault recente"
+                    ? "Vault disponibile per la condivisione"
                     : vault.LastKnownPath;
                 cell.ContentConfiguration = content;
                 cell.Accessory = string.Equals(vault.VaultId, _owner._selectedVaultId, StringComparison.OrdinalIgnoreCase)

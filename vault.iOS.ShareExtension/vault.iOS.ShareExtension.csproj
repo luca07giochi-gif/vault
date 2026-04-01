@@ -28,6 +28,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\\vault.Core\\vault.Core.csproj" />
     <ProjectReference Include="..\\vault.iOS.Shared\\vault.iOS.Shared.csproj" />
   </ItemGroup>
 

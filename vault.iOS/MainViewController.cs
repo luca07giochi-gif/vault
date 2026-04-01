@@ -268,6 +268,7 @@ namespace vault.iOS
             SetupBottomMenu();
             BuildBusyOverlay();
             ConfigureNavigationItems();
+            ShareVaultRegistryBridge.RepublishAppManagedVaults();
             UpdateUiState();
         }
 
@@ -543,7 +544,7 @@ namespace vault.iOS
             _settingsGearButton.SetImage(UIImage.GetSystemImage("gearshape.fill"), UIControlState.Normal);
             _settingsGearButton.TintColor = UIColor.FromRGB(10, 132, 255);
             _settingsGearButton.TouchUpInside += (_, _) => OpenManageRecentVaultsMenu();
-            _settingsGearButton.Hidden = true;
+            _settingsGearButton.Hidden = false;
 
             NavigationItem.RightBarButtonItem = new UIBarButtonItem(_settingsGearButton);
         }
@@ -1271,12 +1272,10 @@ namespace vault.iOS
             if (_session == null || _vaultUrl == null)
                 return;
 
-            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: false);
-            if (store == null)
-                return;
-
             string? vaultPath = _vaultUrl.Path;
-            RecentVaultRecord? existing = store.FindRecentVaultByPath(vaultPath);
+            RecentVaultRecord? existing = ShareVaultRegistryBridge.LoadAppManagedVaults()
+                .FirstOrDefault(vault =>
+                    string.Equals(vault.LastKnownPath, vaultPath ?? string.Empty, StringComparison.OrdinalIgnoreCase));
             string displayName = _vaultUrl.LastPathComponent
                 ?? Path.GetFileName(vaultPath ?? string.Empty)
                 ?? "Vault";
@@ -1286,26 +1285,22 @@ namespace vault.iOS
                 VaultId = existing?.VaultId ?? string.Empty,
                 DisplayName = displayName,
                 LastKnownPath = vaultPath ?? string.Empty,
-                BookmarkDataBase64 = existing?.BookmarkDataBase64,
+                BookmarkDataBase64 = TryCreateVaultBookmarkDataBase64(_vaultUrl) ?? existing?.BookmarkDataBase64,
                 StorageFormat = _session.StorageFormat.ToString(),
                 LastOpenedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                 IsPinned = existing?.IsPinned ?? false
             };
 
-            RecentVaultRecord saved = store.UpsertRecentVault(record);
+            RecentVaultRecord saved = ShareVaultRegistryBridge.UpsertAppManagedVault(record);
             _currentVaultRecentId = saved.VaultId;
         }
 
         private void OpenManageRecentVaultsMenu()
         {
-            SharedVaultQueueStore? store = TryGetSharedQueueStore(showErrorIfUnavailable: true);
-            if (store == null)
-                return;
-
-            IReadOnlyList<RecentVaultRecord> recentVaults = store.LoadRecentVaults();
+            IReadOnlyList<RecentVaultRecord> recentVaults = ShareVaultRegistryBridge.LoadAppManagedVaults();
             if (recentVaults.Count == 0)
             {
-                ShowSimpleAlert("Nessun vault recente", "Apri un vault per renderlo disponibile nella Share Extension.");
+                ShowSimpleAlert("Nessun vault disponibile", "Apri un vault per aggiungerlo all'elenco mostrato nella condivisione.");
                 return;
             }
 
@@ -1323,7 +1318,7 @@ namespace vault.iOS
                 alert.AddAction(UIAlertAction.Create(
                     actionTitle,
                     UIAlertActionStyle.Default,
-                    _ => PromptVaultActions(vault, store)));
+                    _ => PromptVaultActions(vault)));
             }
 
             alert.AddAction(UIAlertAction.Create("Chiudi", UIAlertActionStyle.Cancel, null));
@@ -1331,7 +1326,7 @@ namespace vault.iOS
             PresentViewController(alert, true, null);
         }
 
-        private void PromptVaultActions(RecentVaultRecord vault, SharedVaultQueueStore store)
+        private void PromptVaultActions(RecentVaultRecord vault)
         {
             UIAlertController actionAlert = UIAlertController.Create(
                 vault.DisplayName ?? "Vault",
@@ -1341,7 +1336,7 @@ namespace vault.iOS
             actionAlert.AddAction(UIAlertAction.Create(
                 "Rimuovi dalla Share Extension",
                 UIAlertActionStyle.Destructive,
-                _ => RemoveVaultFromRecents(vault, store)));
+                _ => RemoveVaultFromRecents(vault)));
 
             actionAlert.AddAction(UIAlertAction.Create(
                 "Annulla",
@@ -1351,46 +1346,38 @@ namespace vault.iOS
             PresentViewController(actionAlert, true, null);
         }
 
-        private void RemoveVaultFromRecents(RecentVaultRecord vault, SharedVaultQueueStore store)
+        private void RemoveVaultFromRecents(RecentVaultRecord vault)
         {
-            SharedVaultQueueStore? freshStore = TryGetSharedQueueStore(showErrorIfUnavailable: false);
-            if (freshStore == null)
-                return;
-
-            IReadOnlyList<RecentVaultRecord> allVaults = freshStore.LoadRecentVaults();
-            List<RecentVaultRecord> filtered = allVaults
-                .Where(v => !string.Equals(v.VaultId, vault.VaultId, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            // Riscrivi il file senza questo vault
-            // Purtroppo SharedVaultQueueStore non ha un metodo DeleteVault, quindi dovremo
-            // ricaricare e salvare manualmente
             try
             {
-                // Leggi il file recenti
-                string recentVaultsPath = Path.Combine(freshStore.RootPath, "recent-vaults.json");
-                
-                // Crea un documento con i vault filtrati
-                var document = new
-                {
-                    schemaVersion = 1,
-                    vaults = filtered
-                };
-
-                System.Text.Json.JsonSerializerOptions options = new()
-                {
-                    WriteIndented = true,
-                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
-                };
-
-                string json = System.Text.Json.JsonSerializer.Serialize(document, options);
-                File.WriteAllText(recentVaultsPath, json);
-
-                ShowSimpleAlert("Rimosso", $"{vault.DisplayName} non sarà più disponibile nella Share Extension.");
+                ShareVaultRegistryBridge.RemoveAppManagedVault(vault.VaultId);
+                ShowSimpleAlert("Rimosso", $"{vault.DisplayName} non sara piu disponibile nella Share Extension.");
             }
             catch (Exception ex)
             {
                 ShowSimpleAlert("Errore", $"Impossibile rimuovere il vault: {ex.Message}");
+            }
+        }
+
+        private static string? TryCreateVaultBookmarkDataBase64(NSUrl vaultUrl)
+        {
+            try
+            {
+                NSError? bookmarkError;
+                NSData bookmarkData = vaultUrl.CreateBookmarkData(
+                    NSUrlBookmarkCreationOptions.WithSecurityScope,
+                    null,
+                    null,
+                    out bookmarkError);
+
+                if (bookmarkError != null || bookmarkData == null || bookmarkData.Length <= 0)
+                    return null;
+
+                return Convert.ToBase64String(bookmarkData.ToArray());
+            }
+            catch
+            {
+                return null;
             }
         }
 
