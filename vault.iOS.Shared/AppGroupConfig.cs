@@ -6,12 +6,13 @@ namespace vault.iOS.Shared
         
         /// <summary>
         /// Restituisce il percorso root per i dati condivisi tra app e share extension.
-        /// Usa una cartella nella temp directory accessibile da entrambi.
+        /// Usa la Documents directory dell'app, accessibile da entrambi i processi.
         /// </summary>
         public static string GetSharedVaultQueuePath()
         {
-            string tempDir = Path.GetTempPath();
-            return Path.Combine(tempDir, "VaultSharedQueue");
+            // Su iOS, Documents è il percorso che rimane stabile tra sessioni
+            string docsPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            return Path.Combine(docsPath, "VaultSharedQueue");
         }
     }
 }
