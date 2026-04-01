@@ -20,6 +20,7 @@ namespace vault.iOS.ShareExtension
         private readonly List<RecentVaultRecord> _recentVaults = new();
         private UILabel? _summaryLabel;
         private UILabel? _emptyLabel;
+        private UIView? _emptyStateView;
         private UITableView? _tableView;
         private UIButton? _confirmButton;
         private UIButton? _cancelButton;
@@ -69,15 +70,26 @@ namespace vault.iOS.ShareExtension
                 Lines = 0,
                 Font = UIFont.SystemFontOfSize(15f),
                 TextAlignment = UITextAlignment.Center,
-                TextColor = SecondaryTextColor,
+                TextColor = SecondaryTextColor
+            };
+
+            _emptyStateView = new UIView
+            {
+                TranslatesAutoresizingMaskIntoConstraints = false,
+                BackgroundColor = BackgroundColor,
                 Hidden = true
             };
+            _emptyStateView.AddSubview(_emptyLabel);
 
             _tableView = new UITableView(CGRect.Empty, UITableViewStyle.InsetGrouped)
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
-                Source = new RecentVaultSource(this)
+                Source = new RecentVaultSource(this),
+                BackgroundColor = BackgroundColor,
+                TableFooterView = new UIView(CGRect.Empty),
+                AlwaysBounceVertical = true
             };
+            _tableView.BackgroundView = _emptyStateView;
 
             _cancelButton = UIButton.FromType(UIButtonType.System);
             _cancelButton.TranslatesAutoresizingMaskIntoConstraints = false;
@@ -118,7 +130,6 @@ namespace vault.iOS.ShareExtension
 
             View.AddSubview(titleLabel);
             View.AddSubview(_summaryLabel);
-            View.AddSubview(_emptyLabel);
             View.AddSubview(_tableView);
             View.AddSubview(buttonStack);
             View.AddSubview(_busyIndicator);
@@ -133,10 +144,6 @@ namespace vault.iOS.ShareExtension
                 _summaryLabel.TopAnchor.ConstraintEqualTo(titleLabel.BottomAnchor, 10f),
                 _summaryLabel.LeadingAnchor.ConstraintEqualTo(titleLabel.LeadingAnchor),
                 _summaryLabel.TrailingAnchor.ConstraintEqualTo(titleLabel.TrailingAnchor),
-
-                _emptyLabel.TopAnchor.ConstraintEqualTo(_summaryLabel.BottomAnchor, 18f),
-                _emptyLabel.LeadingAnchor.ConstraintEqualTo(titleLabel.LeadingAnchor),
-                _emptyLabel.TrailingAnchor.ConstraintEqualTo(titleLabel.TrailingAnchor),
 
                 _tableView.TopAnchor.ConstraintEqualTo(_summaryLabel.BottomAnchor, 16f),
                 _tableView.LeadingAnchor.ConstraintEqualTo(View.SafeAreaLayoutGuide.LeadingAnchor),
@@ -156,6 +163,14 @@ namespace vault.iOS.ShareExtension
                 _busyLabel.TrailingAnchor.ConstraintEqualTo(titleLabel.TrailingAnchor),
                 _busyLabel.BottomAnchor.ConstraintLessThanOrEqualTo(View.SafeAreaLayoutGuide.BottomAnchor, -6f)
             });
+
+            NSLayoutConstraint.ActivateConstraints(new[]
+            {
+                _emptyLabel.CenterXAnchor.ConstraintEqualTo(_emptyStateView.CenterXAnchor),
+                _emptyLabel.CenterYAnchor.ConstraintEqualTo(_emptyStateView.CenterYAnchor),
+                _emptyLabel.LeadingAnchor.ConstraintGreaterThanOrEqualTo(_emptyStateView.LeadingAnchor, 24f),
+                _emptyLabel.TrailingAnchor.ConstraintLessThanOrEqualTo(_emptyStateView.TrailingAnchor, -24f)
+            });
         }
 
         private void LoadRecentVaults()
@@ -171,9 +186,13 @@ namespace vault.iOS.ShareExtension
                 };
             }
 
+            string? previousSelection = _selectedVaultId;
             _recentVaults.Clear();
             _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
-            _selectedVaultId = _recentVaults.FirstOrDefault()?.VaultId;
+            _selectedVaultId = _recentVaults.Any(vault =>
+                string.Equals(vault.VaultId, previousSelection, StringComparison.OrdinalIgnoreCase))
+                ? previousSelection
+                : _recentVaults.FirstOrDefault()?.VaultId;
             _tableView?.ReloadData();
             UpdateUiState();
         }
@@ -214,7 +233,13 @@ namespace vault.iOS.ShareExtension
 
             _recentVaults.Clear();
             _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
-            if (_recentVaults.Count == 0)
+            if (string.IsNullOrWhiteSpace(_selectedVaultId) && _recentVaults.Count > 0)
+                _selectedVaultId = _recentVaults.First().VaultId;
+
+            RecentVaultRecord? selectedVault = _recentVaults.FirstOrDefault(vault =>
+                string.Equals(vault.VaultId, _selectedVaultId, StringComparison.OrdinalIgnoreCase));
+
+            if (selectedVault == null && _recentVaults.Count == 0)
             {
                 NSUrl? manualVaultUrl = await PromptManualVaultSelectionAsync();
                 if (manualVaultUrl == null)
@@ -235,16 +260,24 @@ namespace vault.iOS.ShareExtension
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(_selectedVaultId) && _recentVaults.Count > 0)
-                _selectedVaultId = _recentVaults.First().VaultId;
-
             _tableView?.ReloadData();
-
-            RecentVaultRecord? selectedVault = _recentVaults.FirstOrDefault(vault =>
-                string.Equals(vault.VaultId, _selectedVaultId, StringComparison.OrdinalIgnoreCase));
             if (selectedVault == null)
             {
                 ShowError("Scegli un vault.");
+                return;
+            }
+
+            if (RequiresManualVaultSelection(selectedVault))
+            {
+                NSUrl? manualVaultUrl = await PromptManualVaultSelectionAsync();
+                if (manualVaultUrl == null)
+                {
+                    UpdateUiState();
+                    return;
+                }
+
+                await ImportIntoVaultAsync(selectedVault, providers, manualVaultUrl);
+                UpdateUiState();
                 return;
             }
 
@@ -256,6 +289,17 @@ namespace vault.iOS.ShareExtension
             IReadOnlyList<NSItemProvider> providers,
             NSUrl? directVaultUrl = null)
         {
+            NSUrl? vaultUrl = directVaultUrl;
+            if (vaultUrl == null && RequiresManualVaultSelection(selectedVault))
+            {
+                vaultUrl = await PromptManualVaultSelectionAsync();
+                if (vaultUrl == null)
+                {
+                    UpdateUiState();
+                    return;
+                }
+            }
+
             string? password = await PromptPasswordAsync(selectedVault.DisplayName);
             if (password == null)
                 return;
@@ -263,20 +307,8 @@ namespace vault.iOS.ShareExtension
             SetBusy(true, "Sto aprendo il vault...");
 
             VaultPortableReader? session = null;
-            NSUrl? vaultUrl = null;
             try
             {
-                vaultUrl = directVaultUrl;
-                if (vaultUrl == null && RequiresManualVaultSelection(selectedVault))
-                {
-                    vaultUrl = await PromptManualVaultSelectionAsync();
-                    if (vaultUrl == null)
-                    {
-                        SetBusy(false, string.Empty);
-                        return;
-                    }
-                }
-
                 vaultUrl ??= ResolveVaultUrl(selectedVault);
                 session = await Task.Run(() => OpenVaultReader(vaultUrl, password));
             }
@@ -738,23 +770,22 @@ namespace vault.iOS.ShareExtension
         {
             bool hasRecentVaults = _recentVaults.Count > 0;
             bool hasIncoming = GetIncomingProviders().Count > 0;
+            RecentVaultRecord? selectedVault = _recentVaults.FirstOrDefault(vault =>
+                string.Equals(vault.VaultId, _selectedVaultId, StringComparison.OrdinalIgnoreCase));
+            bool selectedVaultRequiresManualSelection = selectedVault == null || RequiresManualVaultSelection(selectedVault);
 
             if (_emptyLabel != null)
             {
-                _emptyLabel.Hidden = hasRecentVaults;
-                if (!hasRecentVaults)
-                {
-                    _emptyLabel.Text = "Se non vedi alcun vault qui, tocca \"Scegli vault\" per selezionare manualmente il file del vault.";
-                }
+                _emptyLabel.Text = "Se non vedi alcun vault qui, tocca \"Scegli vault\" per selezionare manualmente il file del vault.";
             }
 
-            if (_tableView != null)
-                _tableView.Hidden = !hasRecentVaults;
+            if (_emptyStateView != null)
+                _emptyStateView.Hidden = hasRecentVaults;
 
             if (_confirmButton != null)
             {
                 _confirmButton.Enabled = hasIncoming && !_isBusy;
-                _confirmButton.SetTitle(hasRecentVaults ? "Importa" : "Scegli vault", UIControlState.Normal);
+                _confirmButton.SetTitle(hasRecentVaults && !selectedVaultRequiresManualSelection ? "Importa" : "Scegli vault", UIControlState.Normal);
             }
 
             if (_cancelButton != null)
@@ -848,7 +879,10 @@ namespace vault.iOS.ShareExtension
                 UIListContentConfiguration content = cell.DefaultContentConfiguration;
                 content.Text = string.IsNullOrWhiteSpace(vault.DisplayName) ? "Vault" : vault.DisplayName;
                 content.SecondaryText = BuildSecondaryText(vault);
+                content.TextProperties.Color = PrimaryTextColor;
+                content.SecondaryTextProperties.Color = SecondaryTextColor;
                 cell.ContentConfiguration = content;
+                cell.BackgroundColor = BackgroundColor;
                 cell.Accessory = string.Equals(vault.VaultId, _owner._selectedVaultId, StringComparison.OrdinalIgnoreCase)
                     ? UITableViewCellAccessory.Checkmark
                     : UITableViewCellAccessory.None;
