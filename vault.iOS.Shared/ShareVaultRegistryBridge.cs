@@ -162,36 +162,11 @@ namespace vault.iOS.Shared
             try
             {
                 UIPasteboard? pasteboard = UIPasteboard.FromName(PasteboardName, create);
-                if (pasteboard == null)
-                    return null;
-
-                TryMarkPersistent(pasteboard);
                 return pasteboard;
             }
             catch
             {
                 return null;
-            }
-        }
-
-        private static void TryMarkPersistent(UIPasteboard pasteboard)
-        {
-            try
-            {
-#pragma warning disable CS0618
-                pasteboard.Persistent = true;
-#pragma warning restore CS0618
-            }
-            catch
-            {
-                try
-                {
-                    pasteboard.SetValueForKey(NSNumber.FromBoolean(true), new NSString("persistent"));
-                }
-                catch
-                {
-                    // Some iOS versions may ignore this; publication still remains best effort.
-                }
             }
         }
 

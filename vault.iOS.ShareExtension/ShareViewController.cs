@@ -27,6 +27,7 @@ namespace vault.iOS.ShareExtension
         private UILabel? _busyLabel;
         private string? _selectedVaultId;
         private bool _isBusy;
+        private UIDocumentPickerDelegate? _pickerDelegate;
 
         public override void ViewDidLoad()
         {
@@ -215,7 +216,21 @@ namespace vault.iOS.ShareExtension
             _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
             if (_recentVaults.Count == 0)
             {
-                ShowError("Non ci sono vault disponibili. Apri l'app principale, apri un vault e controlla l'elenco dal pulsante impostazioni.");
+                NSUrl? manualVaultUrl = await PromptManualVaultSelectionAsync();
+                if (manualVaultUrl == null)
+                {
+                    UpdateUiState();
+                    return;
+                }
+
+                RecentVaultRecord manualVault = new()
+                {
+                    VaultId = Guid.NewGuid().ToString("N"),
+                    DisplayName = manualVaultUrl.LastPathComponent ?? "Vault",
+                    LastKnownPath = manualVaultUrl.Path ?? string.Empty
+                };
+
+                await ImportIntoVaultAsync(manualVault, providers, manualVaultUrl);
                 UpdateUiState();
                 return;
             }
@@ -233,6 +248,14 @@ namespace vault.iOS.ShareExtension
                 return;
             }
 
+            await ImportIntoVaultAsync(selectedVault, providers);
+        }
+
+        private async Task ImportIntoVaultAsync(
+            RecentVaultRecord selectedVault,
+            IReadOnlyList<NSItemProvider> providers,
+            NSUrl? directVaultUrl = null)
+        {
             string? password = await PromptPasswordAsync(selectedVault.DisplayName);
             if (password == null)
                 return;
@@ -243,7 +266,7 @@ namespace vault.iOS.ShareExtension
             NSUrl? vaultUrl = null;
             try
             {
-                vaultUrl = ResolveVaultUrl(selectedVault);
+                vaultUrl = directVaultUrl ?? ResolveVaultUrl(selectedVault);
                 session = await Task.Run(() => OpenVaultReader(vaultUrl, password));
             }
             catch (Exception ex)
@@ -311,6 +334,26 @@ namespace vault.iOS.ShareExtension
                 foreach (string path in temporaryPaths)
                     TryDeletePath(path);
             }
+        }
+
+        private Task<NSUrl?> PromptManualVaultSelectionAsync()
+        {
+            var tcs = new TaskCompletionSource<NSUrl?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+#pragma warning disable CA1422
+            UIDocumentPickerViewController picker = new(new[] { "public.data" }, UIDocumentPickerMode.Open)
+            {
+                AllowsMultipleSelection = false
+            };
+#pragma warning restore CA1422
+
+            _pickerDelegate = new PickerDelegate(
+                urls => tcs.TrySetResult(urls.FirstOrDefault()),
+                () => tcs.TrySetResult(null));
+
+            picker.Delegate = _pickerDelegate;
+            PresentViewController(picker, true, null);
+            return tcs.Task;
         }
 
         private static void PrepareSessionForPersist(VaultPortableReader session, RecentVaultRecord record)
@@ -654,10 +697,10 @@ namespace vault.iOS.ShareExtension
 
             if (_emptyLabel != null)
             {
-                    _emptyLabel.Hidden = hasRecentVaults;
+                _emptyLabel.Hidden = hasRecentVaults;
                 if (!hasRecentVaults)
                 {
-                    _emptyLabel.Text = "Apri l'app principale, apri almeno un vault e controlla quali vault sono visibili dal pulsante impostazioni in alto a destra.";
+                    _emptyLabel.Text = "Se non vedi alcun vault qui, tocca \"Scegli vault\" per selezionare manualmente il file del vault.";
                 }
             }
 
@@ -665,7 +708,10 @@ namespace vault.iOS.ShareExtension
                 _tableView.Hidden = !hasRecentVaults;
 
             if (_confirmButton != null)
-                _confirmButton.Enabled = hasRecentVaults && hasIncoming && !_isBusy;
+            {
+                _confirmButton.Enabled = hasIncoming && !_isBusy;
+                _confirmButton.SetTitle(hasRecentVaults ? "Importa" : "Scegli vault", UIControlState.Normal);
+            }
 
             if (_cancelButton != null)
                 _cancelButton.Enabled = !_isBusy;
@@ -766,6 +812,48 @@ namespace vault.iOS.ShareExtension
                 tableView.DeselectRow(indexPath, true);
                 RecentVaultRecord vault = _owner._recentVaults[indexPath.Row];
                 _owner.SetSelectedVault(vault.VaultId);
+            }
+        }
+
+        private sealed class PickerDelegate : UIDocumentPickerDelegate
+        {
+            private readonly Action<NSUrl[]> _onPicked;
+            private readonly Action? _onCancelled;
+
+            public PickerDelegate(Action<NSUrl[]> onPicked, Action? onCancelled = null)
+            {
+                _onPicked = onPicked ?? throw new ArgumentNullException(nameof(onPicked));
+                _onCancelled = onCancelled;
+            }
+
+            public override void DidPickDocument(UIDocumentPickerViewController controller, NSUrl url)
+            {
+                NotifyPicked(controller, new[] { url });
+            }
+
+            public override void DidPickDocument(UIDocumentPickerViewController controller, NSUrl[] urls)
+            {
+                NotifyPicked(controller, urls);
+            }
+
+            public override void WasCancelled(UIDocumentPickerViewController controller)
+            {
+                controller.DismissViewController(true, () =>
+                {
+                    if (_onCancelled == null)
+                        return;
+
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(_onCancelled);
+                });
+            }
+
+            private void NotifyPicked(UIDocumentPickerViewController controller, NSUrl[]? urls)
+            {
+                NSUrl[] safeUrls = urls ?? Array.Empty<NSUrl>();
+                controller.DismissViewController(true, () =>
+                {
+                    UIApplication.SharedApplication.BeginInvokeOnMainThread(() => _onPicked(safeUrls));
+                });
             }
         }
     }
