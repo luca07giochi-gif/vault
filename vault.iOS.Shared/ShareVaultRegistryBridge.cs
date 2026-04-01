@@ -29,8 +29,17 @@ namespace vault.iOS.Shared
         {
             try
             {
-                UIPasteboard pasteboard = UIPasteboard.FromName(PasteboardName, false);
+                UIPasteboard? pasteboard = TryGetNamedPasteboard(create: false);
+                if (pasteboard == null)
+                    return Array.Empty<RecentVaultRecord>();
+
+                if (!string.IsNullOrWhiteSpace(pasteboard.String))
+                    return DeserializeVaults(pasteboard.String);
+
                 NSObject? value = pasteboard.GetValue(PasteboardType);
+                if (value is NSString text)
+                    return DeserializeVaults(text.ToString());
+
                 if (value is NSData data)
                     return DeserializeVaults(NSString.FromData(data, NSStringEncoding.UTF8)?.ToString());
             }
@@ -134,13 +143,47 @@ namespace vault.iOS.Shared
             try
             {
                 string json = SerializeVaults(vaults);
+                UIPasteboard? pasteboard = TryGetNamedPasteboard(create: true);
+                if (pasteboard == null)
+                    return;
+
+                pasteboard.String = json;
+
                 NSData data = NSData.FromArray(Encoding.UTF8.GetBytes(json));
-                UIPasteboard pasteboard = UIPasteboard.FromName(PasteboardName, true);
                 pasteboard.SetData(data, PasteboardType);
             }
             catch
             {
                 // Best effort publish.
+            }
+        }
+
+        private static UIPasteboard? TryGetNamedPasteboard(bool create)
+        {
+            try
+            {
+                UIPasteboard? pasteboard = UIPasteboard.FromName(PasteboardName, create);
+                if (pasteboard == null)
+                    return null;
+
+                TryMarkPersistent(pasteboard);
+                return pasteboard;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void TryMarkPersistent(UIPasteboard pasteboard)
+        {
+            try
+            {
+                pasteboard.SetValueForKey(NSNumber.FromBoolean(true), new NSString("persistent"));
+            }
+            catch
+            {
+                // Some iOS versions may ignore this; publication still remains best effort.
             }
         }
 

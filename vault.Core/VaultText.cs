@@ -52,7 +52,7 @@ namespace vault.Core
 
                 ["core.format.fileTooShort"] = Lang("File troppo corto.", "File too short.", "Archivo demasiado corto.", "Fichier trop court."),
                 ["core.format.headerIncomplete"] = Lang("Header incompleto.", "Incomplete header.", "Encabezado incompleto.", "En-tete incomplet."),
-                ["core.format.magicInvalid"] = Lang("Magic invalido.", "Invalid magic.", "Magic invalido.", "Magic invalide."),
+                ["core.format.magicInvalid"] = Lang("Il file scelto non sembra essere un vault valido.", "The selected file does not appear to be a valid vault.", "El archivo seleccionado no parece ser un vault valido.", "Le fichier selectionne ne semble pas etre un coffre valide."),
                 ["core.format.versionUnsupported"] = Lang("Versione non supportata.", "Unsupported version.", "Version no compatible.", "Version non prise en charge."),
                 ["core.format.streamingNotLegacy"] = Lang("Questo vault usa il formato streaming e non supporta la lettura payload legacy.", "This vault uses streaming format and does not support legacy payload reading.", "Este vault usa formato streaming y no admite lectura de payload legacy.", "Ce coffre utilise le format streaming et ne prend pas en charge la lecture du payload legacy."),
                 ["core.format.vaultTooLargeLegacy"] = Lang("Il vault e troppo grande per il formato legacy.", "Vault is too large for legacy format.", "El vault es demasiado grande para formato legacy.", "Le coffre est trop volumineux pour le format legacy."),

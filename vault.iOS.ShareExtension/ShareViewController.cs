@@ -209,7 +209,7 @@ namespace vault.iOS.ShareExtension
             _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
             if (_recentVaults.Count == 0)
             {
-                ShowError("Nessun vault disponibile. Apri l'app principale, apri un vault e aggiorna l'elenco dall'ingranaggio.");
+                ShowError("Non ci sono vault disponibili. Apri l'app principale, apri un vault e controlla l'elenco dal pulsante impostazioni.");
                 UpdateUiState();
                 return;
             }
@@ -223,7 +223,7 @@ namespace vault.iOS.ShareExtension
                 string.Equals(vault.VaultId, _selectedVaultId, StringComparison.OrdinalIgnoreCase));
             if (selectedVault == null)
             {
-                ShowError("Seleziona un vault.");
+                ShowError("Scegli un vault.");
                 return;
             }
 
@@ -231,7 +231,7 @@ namespace vault.iOS.ShareExtension
             if (password == null)
                 return;
 
-            SetBusy(true, "Apertura vault...");
+            SetBusy(true, "Sto aprendo il vault...");
 
             VaultPortableReader? session = null;
             NSUrl? vaultUrl = null;
@@ -272,7 +272,7 @@ namespace vault.iOS.ShareExtension
             string destinationPath)
         {
             List<string> temporaryPaths = new();
-            SetBusy(true, "Importazione nel vault...");
+            SetBusy(true, "Sto importando i file...");
 
             try
             {
@@ -287,8 +287,8 @@ namespace vault.iOS.ShareExtension
 
                     completed++;
                     SetBusy(true, providers.Count == 1
-                        ? "Importazione nel vault..."
-                        : $"Importazione nel vault... ({completed}/{providers.Count})");
+                        ? "Sto importando i file..."
+                        : $"Sto importando i file... ({completed}/{providers.Count})");
                 }
 
                 PrepareSessionForPersist(session, selectedVault);
@@ -346,7 +346,7 @@ namespace vault.iOS.ShareExtension
         {
             var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
             UIAlertController alert = UIAlertController.Create(
-                "Password vault",
+                "Password del vault",
                 string.IsNullOrWhiteSpace(vaultName) ? "Inserisci la password del vault." : $"Inserisci la password di {vaultName}.",
                 UIAlertControllerStyle.Alert);
 
@@ -528,7 +528,7 @@ namespace vault.iOS.ShareExtension
             if (!string.IsNullOrWhiteSpace(path))
                 return NSUrl.FromFilename(path);
 
-            throw new InvalidOperationException("Questo vault non e disponibile per la condivisione. Aprilo di nuovo nell'app principale.");
+            throw new InvalidOperationException("Questo vault non e disponibile al momento. Aprilo di nuovo nell'app principale e riprova.");
         }
 
         private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password)
@@ -648,10 +648,10 @@ namespace vault.iOS.ShareExtension
 
             if (_emptyLabel != null)
             {
-                _emptyLabel.Hidden = hasRecentVaults;
+                    _emptyLabel.Hidden = hasRecentVaults;
                 if (!hasRecentVaults)
                 {
-                    _emptyLabel.Text = "Apri l'app principale, apri almeno un vault e gestisci l'elenco dall'ingranaggio in alto a destra.";
+                    _emptyLabel.Text = "Apri l'app principale, apri almeno un vault e controlla quali vault sono visibili dal pulsante impostazioni in alto a destra.";
                 }
             }
 

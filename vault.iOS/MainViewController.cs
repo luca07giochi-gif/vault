@@ -1115,7 +1115,7 @@ namespace vault.iOS
                 return;
             if (_vaultUrl == null)
             {
-                ShowError("File vault non disponibile.");
+                ShowError("Non riesco a trovare il vault selezionato.");
                 return;
             }
             if (string.IsNullOrWhiteSpace(_sessionPassword))
@@ -1203,7 +1203,7 @@ namespace vault.iOS
                 return;
             if (_vaultUrl == null)
             {
-                ShowError("File vault non disponibile.");
+                ShowError("Non riesco a trovare il vault selezionato.");
                 return;
             }
             if (string.IsNullOrWhiteSpace(_sessionPassword))
@@ -1238,7 +1238,7 @@ namespace vault.iOS
         private async Task RestoreSessionFromDiskAsync(string password, string folderPath)
         {
             if (_vaultUrl == null)
-                throw new InvalidOperationException("File vault non disponibile.");
+                throw new InvalidOperationException("Non riesco ad accedere al vault selezionato.");
 
             VaultPortableReader restored = await Task.Run(() => OpenVaultReader(_vaultUrl, password));
 
@@ -1304,15 +1304,16 @@ namespace vault.iOS
 
         private void OpenManageRecentVaultsMenu()
         {
+            ShareVaultRegistryBridge.RepublishAppManagedVaults();
             IReadOnlyList<RecentVaultRecord> recentVaults = ShareVaultRegistryBridge.LoadAppManagedVaults();
             if (recentVaults.Count == 0)
             {
-                ShowSimpleAlert("Nessun vault disponibile", "Apri un vault per aggiungerlo all'elenco mostrato nella condivisione.");
+                ShowSimpleAlert("Nessun vault disponibile", "Apri un vault per farlo comparire nel menu Condividi.");
                 return;
             }
 
             UIAlertController alert = UIAlertController.Create(
-                "Gestisci vault per la condivisione",
+                "Vault visibili nel menu Condividi",
                 $"{recentVaults.Count} vault disponibili",
                 UIAlertControllerStyle.Alert);
 
@@ -1341,7 +1342,7 @@ namespace vault.iOS
                 UIAlertControllerStyle.ActionSheet);
 
             actionAlert.AddAction(UIAlertAction.Create(
-                "Rimuovi dalla Share Extension",
+                "Non mostrare nel menu Condividi",
                 UIAlertActionStyle.Destructive,
                 _ => RemoveVaultFromRecents(vault)));
 
@@ -1358,7 +1359,7 @@ namespace vault.iOS
             try
             {
                 ShareVaultRegistryBridge.RemoveAppManagedVault(vault.VaultId);
-                ShowSimpleAlert("Rimosso", $"{vault.DisplayName} non sara piu disponibile nella Share Extension.");
+                ShowSimpleAlert("Aggiornato", $"{vault.DisplayName} non verra piu mostrato nel menu Condividi.");
             }
             catch (Exception ex)
             {
