@@ -36,6 +36,12 @@ namespace vault.iOS.ShareExtension
             LoadRecentVaults();
         }
 
+        public override void ViewWillAppear(bool animated)
+        {
+            base.ViewWillAppear(animated);
+            LoadRecentVaults();
+        }
+
         private void BuildUi()
         {
             View!.BackgroundColor = BackgroundColor;

@@ -12,6 +12,7 @@ namespace vault.iOS.Shared
         private const string AppDefaultsKey = "vault.share.registry.v1";
         private const string PasteboardName = "com.luca07giochi.vaultios.share.registry";
         private const string PasteboardType = "com.luca07giochi.vaultios.share.registry+json";
+        private static readonly NSString PasteboardTypeKey = new(PasteboardType);
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -29,19 +30,13 @@ namespace vault.iOS.Shared
         {
             try
             {
-                UIPasteboard? pasteboard = TryGetNamedPasteboard(create: false);
-                if (pasteboard == null)
-                    return Array.Empty<RecentVaultRecord>();
+                string? namedJson = TryReadJsonFromPasteboard(TryGetNamedPasteboard(create: false), allowPlainString: true);
+                if (!string.IsNullOrWhiteSpace(namedJson))
+                    return DeserializeVaults(namedJson);
 
-                if (!string.IsNullOrWhiteSpace(pasteboard.String))
-                    return DeserializeVaults(pasteboard.String);
-
-                NSObject? value = pasteboard.GetValue(PasteboardType);
-                if (value is NSString text)
-                    return DeserializeVaults(text.ToString());
-
-                if (value is NSData data)
-                    return DeserializeVaults(NSString.FromData(data, NSStringEncoding.UTF8)?.ToString());
+                string? generalJson = TryReadJsonFromPasteboard(UIPasteboard.General, allowPlainString: false);
+                if (!string.IsNullOrWhiteSpace(generalJson))
+                    return DeserializeVaults(generalJson);
             }
             catch
             {
@@ -145,12 +140,16 @@ namespace vault.iOS.Shared
                 string json = SerializeVaults(vaults);
                 UIPasteboard? pasteboard = TryGetNamedPasteboard(create: true);
                 if (pasteboard == null)
+                {
+                    TrySaveToGeneralPasteboard(json);
                     return;
+                }
 
                 pasteboard.String = json;
-
                 NSData data = NSData.FromArray(Encoding.UTF8.GetBytes(json));
                 pasteboard.SetData(data, PasteboardType);
+
+                TrySaveToGeneralPasteboard(json);
             }
             catch
             {
@@ -179,11 +178,70 @@ namespace vault.iOS.Shared
         {
             try
             {
-                pasteboard.SetValueForKey(NSNumber.FromBoolean(true), new NSString("persistent"));
+#pragma warning disable CS0618
+                pasteboard.Persistent = true;
+#pragma warning restore CS0618
             }
             catch
             {
-                // Some iOS versions may ignore this; publication still remains best effort.
+                try
+                {
+                    pasteboard.SetValueForKey(NSNumber.FromBoolean(true), new NSString("persistent"));
+                }
+                catch
+                {
+                    // Some iOS versions may ignore this; publication still remains best effort.
+                }
+            }
+        }
+
+        private static string? TryReadJsonFromPasteboard(UIPasteboard? pasteboard, bool allowPlainString)
+        {
+            if (pasteboard == null)
+                return null;
+
+            if (allowPlainString && !string.IsNullOrWhiteSpace(pasteboard.String))
+                return pasteboard.String;
+
+            foreach (NSDictionary item in pasteboard.Items?.OfType<NSDictionary>().Reverse() ?? Enumerable.Empty<NSDictionary>())
+            {
+                NSObject? raw = item.ObjectForKey(PasteboardTypeKey);
+                string? decoded = DecodeJsonPayload(raw);
+                if (!string.IsNullOrWhiteSpace(decoded))
+                    return decoded;
+            }
+
+            return DecodeJsonPayload(pasteboard.GetValue(PasteboardType));
+        }
+
+        private static string? DecodeJsonPayload(NSObject? raw)
+        {
+            if (raw is NSString text)
+                return text.ToString();
+
+            if (raw is NSData data)
+                return NSString.FromData(data, NSStringEncoding.UTF8)?.ToString();
+
+            return null;
+        }
+
+        private static void TrySaveToGeneralPasteboard(string json)
+        {
+            try
+            {
+                UIPasteboard pasteboard = UIPasteboard.General;
+                List<NSDictionary> items = pasteboard.Items?.OfType<NSDictionary>()
+                    .Where(item => item.ObjectForKey(PasteboardTypeKey) == null)
+                    .ToList()
+                    ?? new List<NSDictionary>();
+
+                NSDictionary bridgeItem = NSDictionary.FromObjectAndKey(new NSString(json), PasteboardTypeKey);
+                items.Add(bridgeItem);
+                pasteboard.Items = items.ToArray();
+            }
+            catch
+            {
+                // Best effort fallback.
             }
         }
 
