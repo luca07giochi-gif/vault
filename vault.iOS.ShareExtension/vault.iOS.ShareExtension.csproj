@@ -22,6 +22,7 @@
     <CreatePackage>false</CreatePackage>
     <CodesignEntitlements>Entitlements.plist</CodesignEntitlements>
     <MtouchLink>SdkOnly</MtouchLink>
+    <MtouchExtraArgs>--gcc_flags "-framework Security -framework CoreFoundation"</MtouchExtraArgs>
     <PublishTrimmed>true</PublishTrimmed>
     <CheckEolWorkloads>false</CheckEolWorkloads>
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
