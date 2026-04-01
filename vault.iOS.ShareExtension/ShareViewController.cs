@@ -600,11 +600,21 @@ namespace vault.iOS.ShareExtension
             if (string.IsNullOrWhiteSpace(path))
                 throw new IOException("Percorso vault non valido.");
 
-            string tempPath = CreateVaultWriteTempPathNearDestination(path);
+            string tempPath = CreateVaultWriteTempPathNearDestination(path, out bool tempNearDestination);
             try
             {
-                using (FileStream output = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                try
                 {
+                    using FileStream output = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                    session.SaveToStream(output);
+                    output.Flush(flushToDisk: true);
+                }
+                catch (Exception) when (tempNearDestination)
+                {
+                    TryDeletePath(tempPath);
+                    tempPath = CreateVaultWriteFallbackTempPath();
+
+                    using FileStream output = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None);
                     session.SaveToStream(output);
                     output.Flush(flushToDisk: true);
                 }
@@ -625,8 +635,9 @@ namespace vault.iOS.ShareExtension
             }
         }
 
-        private static string CreateVaultWriteTempPathNearDestination(string destinationPath)
+        private static string CreateVaultWriteTempPathNearDestination(string destinationPath, out bool nearDestination)
         {
+            nearDestination = false;
             string fileName = Path.GetFileName(destinationPath);
             string? destinationDirectory = Path.GetDirectoryName(destinationPath);
             if (!string.IsNullOrWhiteSpace(destinationDirectory))
@@ -634,7 +645,14 @@ namespace vault.iOS.ShareExtension
                 try
                 {
                     Directory.CreateDirectory(destinationDirectory);
-                    return Path.Combine(destinationDirectory, $".{fileName}.{Guid.NewGuid():N}.tmp");
+                    string candidate = Path.Combine(destinationDirectory, $".{fileName}.{Guid.NewGuid():N}.tmp");
+                    using (FileStream probe = new(candidate, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                    }
+
+                    File.Delete(candidate);
+                    nearDestination = true;
+                    return candidate;
                 }
                 catch
                 {
@@ -642,6 +660,11 @@ namespace vault.iOS.ShareExtension
                 }
             }
 
+            return CreateVaultWriteFallbackTempPath();
+        }
+
+        private static string CreateVaultWriteFallbackTempPath()
+        {
             string runtimeRoot = Path.Combine(Path.GetTempPath(), "vault-ios-share-runtime");
             Directory.CreateDirectory(runtimeRoot);
             return Path.Combine(runtimeRoot, $"{Guid.NewGuid():N}.tmp");
