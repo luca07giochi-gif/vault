@@ -132,6 +132,11 @@ namespace vault.iOS
             return Path.Combine(Path.GetTempPath(), RuntimeTempDirectoryName);
         }
 
+        private static string GetAppDocumentsDirectoryPath()
+        {
+            return Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        }
+
         private static string GetThumbnailCacheDirectoryPath()
         {
             return Path.Combine(GetRuntimeTempDirectoryPath(), ThumbnailCacheDirectoryName);
@@ -1257,7 +1262,7 @@ namespace vault.iOS
 
         private SharedVaultQueueStore? TryGetCurrentVaultQueueStore(bool showErrorIfUnavailable)
         {
-            if (_vaultUrl == null)
+            if (_session == null || _vaultUrl == null)
             {
                 if (showErrorIfUnavailable)
                     ShowError("Apri prima un vault.");
@@ -1266,7 +1271,7 @@ namespace vault.iOS
 
             try
             {
-                string rootPath = VaultPendingImportLocator.GetQueueRootPath(_vaultUrl.Path);
+                string rootPath = EnsureCurrentVaultPendingImportFolder();
                 if (string.IsNullOrWhiteSpace(rootPath))
                     throw new InvalidOperationException("Impossibile accedere al percorso di condivisione.");
 
@@ -1286,32 +1291,100 @@ namespace vault.iOS
             }
         }
 
+        private string EnsureCurrentVaultPendingImportFolder()
+        {
+            if (_session == null || _vaultUrl == null)
+                throw new InvalidOperationException("Vault non aperto.");
+
+            string documentsRootPath = GetAppDocumentsDirectoryPath();
+            string importsRootPath = VaultPendingImportLocator.GetAppImportsRootPath(documentsRootPath);
+            Directory.CreateDirectory(importsRootPath);
+
+            RecentVaultRecord? existing = FindExistingCurrentVaultRecord();
+            string vaultId = _session.VaultId;
+            string displayName = _vaultUrl.LastPathComponent
+                ?? Path.GetFileName(_vaultUrl.Path ?? string.Empty)
+                ?? "Vault";
+
+            string targetRootPath = ResolvePendingImportRootPath(existing, importsRootPath, displayName, vaultId);
+            Directory.CreateDirectory(targetRootPath);
+
+            SharedVaultQueueStore store = new(targetRootPath);
+            store.SaveVaultManifest(new VaultPendingImportManifest
+            {
+                VaultId = vaultId,
+                DisplayName = displayName,
+                LastKnownPath = _vaultUrl.Path ?? string.Empty
+            });
+
+            _sharedQueueStore = store;
+            _sharedQueueRootPath = targetRootPath;
+            return targetRootPath;
+        }
+
+        private RecentVaultRecord? FindExistingCurrentVaultRecord()
+        {
+            if (_session == null || _vaultUrl == null)
+                return null;
+
+            string currentVaultId = _session.VaultId;
+            string currentVaultPath = _vaultUrl.Path ?? string.Empty;
+
+            return ShareVaultRegistryBridge.LoadAppManagedVaults()
+                .FirstOrDefault(vault =>
+                    string.Equals(vault.VaultId, currentVaultId, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(vault.LastKnownPath, currentVaultPath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string ResolvePendingImportRootPath(
+            RecentVaultRecord? existingRecord,
+            string importsRootPath,
+            string displayName,
+            string vaultId)
+        {
+            string expectedPath = VaultPendingImportLocator.GetVaultFolderPath(importsRootPath, displayName, vaultId);
+            if (existingRecord == null || string.IsNullOrWhiteSpace(existingRecord.ImportFolderPath))
+                return expectedPath;
+
+            string existingPath = VaultPendingImportLocator.NormalizePath(existingRecord.ImportFolderPath);
+            if (string.IsNullOrWhiteSpace(existingPath))
+                return expectedPath;
+
+            VaultPendingImportManifest? manifest = SharedVaultQueueStore.TryReadVaultManifest(existingPath);
+            if (manifest == null || string.Equals(manifest.VaultId, vaultId, StringComparison.OrdinalIgnoreCase))
+                return existingPath;
+
+            return expectedPath;
+        }
+
         private void RegisterCurrentVaultAsRecent()
         {
             if (_session == null || _vaultUrl == null)
                 return;
 
             string? vaultPath = _vaultUrl.Path;
-            RecentVaultRecord? existing = ShareVaultRegistryBridge.LoadAppManagedVaults()
-                .FirstOrDefault(vault =>
-                    string.Equals(vault.LastKnownPath, vaultPath ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+            RecentVaultRecord? existing = FindExistingCurrentVaultRecord();
             string displayName = _vaultUrl.LastPathComponent
                 ?? Path.GetFileName(vaultPath ?? string.Empty)
                 ?? "Vault";
+            string importFolderPath = EnsureCurrentVaultPendingImportFolder();
+            string? importFolderBookmark = TryCreateBookmarkDataBase64(NSUrl.FromFilename(importFolderPath));
 
             RecentVaultRecord record = new()
             {
-                VaultId = existing?.VaultId ?? string.Empty,
+                VaultId = _session.VaultId,
                 DisplayName = displayName,
                 LastKnownPath = vaultPath ?? string.Empty,
-                BookmarkDataBase64 = TryCreateVaultBookmarkDataBase64(_vaultUrl) ?? existing?.BookmarkDataBase64,
+                BookmarkDataBase64 = TryCreateBookmarkDataBase64(_vaultUrl) ?? existing?.BookmarkDataBase64,
+                ImportFolderPath = importFolderPath,
+                ImportFolderBookmarkDataBase64 = importFolderBookmark ?? existing?.ImportFolderBookmarkDataBase64,
                 StorageFormat = _session.StorageFormat.ToString(),
                 LastOpenedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                 IsPinned = existing?.IsPinned ?? false
             };
 
             ShareVaultRegistryBridge.UpsertAppManagedVault(record);
-            _currentVaultRecentId = VaultPendingImportLocator.GetVaultId(vaultPath);
+            _currentVaultRecentId = _session.VaultId;
         }
 
         private void OpenManageRecentVaultsMenu()
@@ -1379,13 +1452,13 @@ namespace vault.iOS
             }
         }
 
-        private static string? TryCreateVaultBookmarkDataBase64(NSUrl vaultUrl)
+        private static string? TryCreateBookmarkDataBase64(NSUrl fileUrl)
         {
             try
             {
                 NSError? bookmarkError;
                 // iOS non supporta le opzioni security-scoped del binding .NET usate su macOS.
-                NSData bookmarkData = vaultUrl.CreateBookmarkData(
+                NSData bookmarkData = fileUrl.CreateBookmarkData(
                     0,
                     null,
                     null,
@@ -2375,6 +2448,20 @@ namespace vault.iOS
             if (!opened || _session == null || _vaultUrl == null)
                 return;
 
+            if (_session.NeedsVaultIdUpgrade)
+            {
+                ShowSimpleAlert(
+                    "Aggiornamento vault",
+                    "Questo vault non aveva ancora un identificatore interno. Lo aggiorno ora per renderlo compatibile con la condivisione.");
+                await RunBusyWithProgressAsync("Aggiornamento vault...", async progress =>
+                {
+                    await PersistVaultAsync(progress);
+                });
+
+                if (_session.NeedsVaultIdUpgrade)
+                    return;
+            }
+
             RegisterCurrentVaultAsRecent();
             PromptPendingImportsForCurrentVaultIfNeeded();
         }
@@ -2936,7 +3023,7 @@ namespace vault.iOS
 
         private async Task PersistVaultAsync(IProgress<double>? progress = null)
         {
-            if (_session == null || _vaultUrl == null || !_session.IsDirty)
+            if (_session == null || _vaultUrl == null || (!_session.IsDirty && !_session.NeedsVaultIdUpgrade))
                 return;
 
             VaultPortableReader session = _session;

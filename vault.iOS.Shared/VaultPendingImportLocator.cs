@@ -1,45 +1,52 @@
-using System;
-using System.IO;
-using System.Security.Cryptography;
-using System.Text;
+using System.Text.RegularExpressions;
 
 namespace vault.iOS.Shared
 {
     public static class VaultPendingImportLocator
     {
-        private const string QueueRootFolderName = "Importazioni Cassaforte";
+        public const string AppImportsRootFolderName = "Importazioni Cassaforte";
+        private const int ShortIdLength = 8;
 
-        public static string GetVaultId(string? vaultPath)
+        public static string GetAppImportsRootPath(string? documentsRootPath)
         {
-            string normalized = NormalizePath(vaultPath);
-            if (string.IsNullOrWhiteSpace(normalized))
-                throw new ArgumentException("Percorso vault non valido.", nameof(vaultPath));
+            string normalizedDocumentsPath = NormalizePath(documentsRootPath);
+            if (string.IsNullOrWhiteSpace(normalizedDocumentsPath))
+                throw new ArgumentException("Cartella documenti non valida.", nameof(documentsRootPath));
 
-            byte[] bytes = Encoding.UTF8.GetBytes(normalized);
-            byte[] hash = SHA256.HashData(bytes);
-            return Convert.ToHexString(hash).ToLowerInvariant();
+            return Path.Combine(normalizedDocumentsPath, AppImportsRootFolderName);
         }
 
-        public static string GetQueueRootPath(string? vaultPath)
+        public static string GetVaultFolderPath(string appImportsRootPath, string? displayName, string vaultId)
         {
-            string normalized = NormalizePath(vaultPath);
-            if (string.IsNullOrWhiteSpace(normalized))
-                throw new ArgumentException("Percorso vault non valido.", nameof(vaultPath));
+            string normalizedRoot = NormalizePath(appImportsRootPath);
+            if (string.IsNullOrWhiteSpace(normalizedRoot))
+                throw new ArgumentException("Cartella importazioni non valida.", nameof(appImportsRootPath));
 
-            string? directory = Path.GetDirectoryName(normalized);
-            if (string.IsNullOrWhiteSpace(directory))
-                throw new InvalidOperationException("Cartella del vault non disponibile.");
-
-            string baseName = Path.GetFileNameWithoutExtension(normalized);
-            if (string.IsNullOrWhiteSpace(baseName))
-                baseName = Path.GetFileName(normalized);
-
-            string safeBaseName = SanitizeFileName(baseName);
-            string shortHash = GetVaultId(normalized)[..12];
-            return Path.Combine(directory, QueueRootFolderName, $"{safeBaseName}-{shortHash}");
+            return Path.Combine(normalizedRoot, GetVaultFolderName(displayName, vaultId));
         }
 
-        private static string NormalizePath(string? path)
+        public static string GetVaultFolderName(string? displayName, string vaultId)
+        {
+            string safeName = SanitizeFileName(displayName);
+            return $"{safeName} [{GetVaultShortId(vaultId)}]";
+        }
+
+        public static string GetVaultShortId(string vaultId)
+        {
+            if (string.IsNullOrWhiteSpace(vaultId))
+                throw new ArgumentException("VaultId non valido.", nameof(vaultId));
+
+            string normalized = Regex.Replace(vaultId.Trim(), "^vlt_", string.Empty, RegexOptions.IgnoreCase);
+            normalized = Regex.Replace(normalized, "[^a-zA-Z0-9]", string.Empty);
+            if (string.IsNullOrWhiteSpace(normalized))
+                throw new ArgumentException("VaultId non valido.", nameof(vaultId));
+
+            return normalized.Length <= ShortIdLength
+                ? normalized.ToLowerInvariant()
+                : normalized[..ShortIdLength].ToLowerInvariant();
+        }
+
+        public static string NormalizePath(string? path)
         {
             if (string.IsNullOrWhiteSpace(path))
                 return string.Empty;
@@ -56,7 +63,7 @@ namespace vault.iOS.Shared
             }
         }
 
-        private static string SanitizeFileName(string? fileName)
+        public static string SanitizeFileName(string? fileName)
         {
             string trimmed = string.IsNullOrWhiteSpace(fileName) ? "Vault" : fileName.Trim();
             foreach (char invalid in Path.GetInvalidFileNameChars())

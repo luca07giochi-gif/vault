@@ -17,7 +17,8 @@ namespace vault.iOS.Shared
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             WriteIndented = false,
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true
         };
 
         public static IReadOnlyList<RecentVaultRecord> LoadAppManagedVaults()
@@ -46,6 +47,45 @@ namespace vault.iOS.Shared
             return Array.Empty<RecentVaultRecord>();
         }
 
+        public static IReadOnlyList<RecentVaultRecord> LoadPublishedVaultsMergedWithLocalVaults()
+        {
+            List<RecentVaultRecord> merged = LoadPublishedVaults()
+                .Select(CloneAndNormalizeRecord)
+                .ToList();
+
+            foreach (RecentVaultRecord localRecord in LoadAppManagedVaults())
+            {
+                RecentVaultRecord candidate = CloneAndNormalizeRecord(localRecord);
+                RecentVaultRecord? existing = merged.FirstOrDefault(vault =>
+                    string.Equals(vault.VaultId, candidate.VaultId, StringComparison.OrdinalIgnoreCase));
+
+                if (existing == null && !string.IsNullOrWhiteSpace(candidate.LastKnownPath))
+                {
+                    existing = merged.FirstOrDefault(vault =>
+                        string.Equals(NormalizePath(vault.LastKnownPath), candidate.LastKnownPath, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (existing == null)
+                {
+                    merged.Add(candidate);
+                    continue;
+                }
+
+                MergeRecord(existing, candidate);
+            }
+
+            return merged
+                .GroupBy(vault => string.IsNullOrWhiteSpace(vault.LastKnownPath) ? vault.VaultId : NormalizePath(vault.LastKnownPath),
+                    StringComparer.OrdinalIgnoreCase)
+                .Select(group => group
+                    .OrderByDescending(vault => vault.IsPinned)
+                    .ThenByDescending(vault => vault.LastOpenedAtUtc)
+                    .First())
+                .OrderByDescending(vault => vault.IsPinned)
+                .ThenByDescending(vault => vault.LastOpenedAtUtc)
+                .ToArray();
+        }
+
         public static RecentVaultRecord UpsertAppManagedVault(RecentVaultRecord record, int limit = 12)
         {
             if (record == null)
@@ -69,11 +109,18 @@ namespace vault.iOS.Shared
             }
             else
             {
+                existing.VaultId = record.VaultId;
                 existing.DisplayName = record.DisplayName;
                 existing.LastKnownPath = record.LastKnownPath;
                 existing.BookmarkDataBase64 = string.IsNullOrWhiteSpace(record.BookmarkDataBase64)
                     ? existing.BookmarkDataBase64
                     : record.BookmarkDataBase64;
+                existing.ImportFolderPath = string.IsNullOrWhiteSpace(record.ImportFolderPath)
+                    ? existing.ImportFolderPath
+                    : record.ImportFolderPath;
+                existing.ImportFolderBookmarkDataBase64 = string.IsNullOrWhiteSpace(record.ImportFolderBookmarkDataBase64)
+                    ? existing.ImportFolderBookmarkDataBase64
+                    : record.ImportFolderBookmarkDataBase64;
                 existing.StorageFormat = string.IsNullOrWhiteSpace(record.StorageFormat)
                     ? existing.StorageFormat
                     : record.StorageFormat;
@@ -263,6 +310,8 @@ namespace vault.iOS.Shared
                 DisplayName = record.DisplayName,
                 LastKnownPath = record.LastKnownPath,
                 BookmarkDataBase64 = record.BookmarkDataBase64,
+                ImportFolderPath = record.ImportFolderPath,
+                ImportFolderBookmarkDataBase64 = record.ImportFolderBookmarkDataBase64,
                 StorageFormat = record.StorageFormat,
                 LastOpenedAtUtc = record.LastOpenedAtUtc,
                 IsPinned = record.IsPinned
@@ -284,6 +333,12 @@ namespace vault.iOS.Shared
             record.BookmarkDataBase64 = string.IsNullOrWhiteSpace(record.BookmarkDataBase64)
                 ? null
                 : record.BookmarkDataBase64.Trim();
+            record.ImportFolderPath = string.IsNullOrWhiteSpace(record.ImportFolderPath)
+                ? null
+                : NormalizePath(record.ImportFolderPath);
+            record.ImportFolderBookmarkDataBase64 = string.IsNullOrWhiteSpace(record.ImportFolderBookmarkDataBase64)
+                ? null
+                : record.ImportFolderBookmarkDataBase64.Trim();
             record.StorageFormat = string.IsNullOrWhiteSpace(record.StorageFormat)
                 ? string.Empty
                 : record.StorageFormat.Trim();
@@ -307,6 +362,24 @@ namespace vault.iOS.Shared
             {
                 return path.Trim();
             }
+        }
+
+        private static void MergeRecord(RecentVaultRecord target, RecentVaultRecord source)
+        {
+            target.DisplayName = string.IsNullOrWhiteSpace(source.DisplayName) ? target.DisplayName : source.DisplayName;
+            target.LastKnownPath = string.IsNullOrWhiteSpace(source.LastKnownPath) ? target.LastKnownPath : source.LastKnownPath;
+            target.BookmarkDataBase64 = string.IsNullOrWhiteSpace(source.BookmarkDataBase64)
+                ? target.BookmarkDataBase64
+                : source.BookmarkDataBase64;
+            target.ImportFolderPath = string.IsNullOrWhiteSpace(source.ImportFolderPath)
+                ? target.ImportFolderPath
+                : source.ImportFolderPath;
+            target.ImportFolderBookmarkDataBase64 = string.IsNullOrWhiteSpace(source.ImportFolderBookmarkDataBase64)
+                ? target.ImportFolderBookmarkDataBase64
+                : source.ImportFolderBookmarkDataBase64;
+            target.StorageFormat = string.IsNullOrWhiteSpace(source.StorageFormat) ? target.StorageFormat : source.StorageFormat;
+            target.LastOpenedAtUtc = Math.Max(target.LastOpenedAtUtc, source.LastOpenedAtUtc);
+            target.IsPinned = target.IsPinned || source.IsPinned;
         }
 
         private sealed class RegistryDocument

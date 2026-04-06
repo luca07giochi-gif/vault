@@ -23,6 +23,8 @@ namespace vault.Core.Domain
         private byte[]? _sessionKey;
         private byte[]? _salt;
         private string? _currentFilePath;
+        private byte[]? _vaultIdBytes;
+        private bool _needsVaultIdUpgrade;
         private VaultStorageFormat _storageFormat = VaultStorageFormat.Extended;
 
         private int _failedOpenAttempts;
@@ -32,6 +34,9 @@ namespace vault.Core.Domain
         public string? CurrentVaultPath => _currentFilePath;
         public VaultStorageFormat? CurrentVaultStorageFormat =>
             IsVaultOpen ? _storageFormat : null;
+        public string? CurrentVaultId =>
+            _vaultIdBytes == null ? null : VaultFileFormat.FormatVaultId(_vaultIdBytes);
+        public bool NeedsVaultIdUpgrade => _needsVaultIdUpgrade;
 
         public int RemainingOpenAttempts =>
             Math.Max(0, MaxFailedOpenAttempts - _failedOpenAttempts);
@@ -59,14 +64,18 @@ namespace vault.Core.Domain
                 _sessionKey = KeyDerivation.DeriveKey(pwdBytes, _salt);
                 ReportProgress(progress, 18);
 
-                _storageFormat = header.Version switch
+                _storageFormat = VaultFileFormat.GetStorageKind(header.Version) switch
                 {
-                    VaultFileFormat.LEGACY_VERSION => VaultStorageFormat.Legacy,
-                    VaultFileFormat.ULTRA_STREAMING_VERSION => VaultStorageFormat.Ultra,
+                    VaultFileFormat.VaultStorageKind.Legacy => VaultStorageFormat.Legacy,
+                    VaultFileFormat.VaultStorageKind.Ultra => VaultStorageFormat.Ultra,
                     _ => VaultStorageFormat.Extended
                 };
+                _vaultIdBytes = header.HasVaultId
+                    ? header.VaultIdBytes!.ToArray()
+                    : VaultFileFormat.GenerateVaultIdBytes();
+                _needsVaultIdUpgrade = !header.HasVaultId;
 
-                if (header.Version == VaultFileFormat.LEGACY_VERSION)
+                if (VaultFileFormat.GetStorageKind(header.Version) == VaultFileFormat.VaultStorageKind.Legacy)
                 {
                     byte[] encryptedPayload = ReadLegacyEncryptedPayloadWithProgress(path, CreateScaledProgress(progress, 18, 48));
                     ReportProgress(progress, 48);
@@ -88,11 +97,10 @@ namespace vault.Core.Domain
                     _content = VaultSerializer.Deserialize(decrypted, deserializeProgress);
                     Array.Clear(decrypted, 0, decrypted.Length);
                 }
-                else if (header.Version == VaultFileFormat.STREAMING_VERSION ||
-                         header.Version == VaultFileFormat.ULTRA_STREAMING_VERSION)
+                else if (VaultFileFormat.GetStorageKind(header.Version) is VaultFileFormat.VaultStorageKind.Extended or VaultFileFormat.VaultStorageKind.Ultra)
                 {
                     using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-                    fs.Position = VaultFileFormat.HEADER_SIZE;
+                    fs.Position = header.Size;
 
                     using var decryptedPayload =
                         VaultFileFormat.CreateStreamingDecryptingReadStream(fs, _sessionKey, header);
@@ -167,6 +175,8 @@ namespace vault.Core.Domain
                 };
 
                 _storageFormat = storageFormat;
+                _vaultIdBytes = VaultFileFormat.GenerateVaultIdBytes();
+                _needsVaultIdUpgrade = false;
                 _currentFilePath = path;
                 Save(CreateScaledProgress(progress, 22, 100));
             }
@@ -595,20 +605,34 @@ namespace vault.Core.Domain
         {
             if (!IsVaultOpen || _sessionKey == null || _currentFilePath == null || _salt == null)
                 return;
+            if (_vaultIdBytes == null || _vaultIdBytes.Length != VaultFileFormat.VAULT_ID_SIZE)
+                throw new InvalidOperationException("VaultId non disponibile.");
 
             if (_storageFormat == VaultStorageFormat.Legacy)
             {
                 SaveLegacyFormat(_sessionKey, _salt, _currentFilePath, progress);
+                _needsVaultIdUpgrade = false;
                 return;
             }
 
             if (_storageFormat == VaultStorageFormat.Ultra)
             {
                 SaveUltraFormat(_sessionKey, _salt, _currentFilePath, progress);
+                _needsVaultIdUpgrade = false;
                 return;
             }
 
             SaveExtendedFormat(_sessionKey, _salt, _currentFilePath, progress);
+            _needsVaultIdUpgrade = false;
+        }
+
+        public void PersistVaultIdentityUpgrade(IProgress<double>? progress = null)
+        {
+            EnsureVaultOpen();
+            if (!_needsVaultIdUpgrade)
+                return;
+
+            Save(progress);
         }
 
         private void SaveLegacyFormat(
@@ -628,9 +652,10 @@ namespace vault.Core.Domain
             byte[] nonce = VaultFileFormat.GenerateNonce();
             var header = new VaultFileFormat.Header(
                 VaultFileFormat.MAGIC,
-                VaultFileFormat.LEGACY_VERSION,
+                VaultFileFormat.LEGACY_VERSION_WITH_ID,
                 salt,
-                nonce);
+                nonce,
+                _vaultIdBytes);
 
             ReportProgress(progress, 4);
             byte[] plaintext = VaultSerializer.Serialize(
@@ -650,7 +675,8 @@ namespace vault.Core.Domain
                     encrypted,
                     salt,
                     nonce,
-                    VaultFileFormat.LEGACY_VERSION);
+                    VaultFileFormat.LEGACY_VERSION_WITH_ID,
+                    _vaultIdBytes);
 
                 ReportProgress(progress, 92);
                 ReplaceVaultFile(tempPath, vaultPath);
@@ -679,9 +705,10 @@ namespace vault.Core.Domain
             byte[] nonce = VaultFileFormat.GenerateNonce();
             var header = new VaultFileFormat.Header(
                 VaultFileFormat.MAGIC,
-                VaultFileFormat.STREAMING_VERSION,
+                VaultFileFormat.STREAMING_VERSION_WITH_ID,
                 salt,
-                nonce);
+                nonce,
+                _vaultIdBytes);
 
             string tempPath = vaultPath + ".tmp";
             try
@@ -719,9 +746,10 @@ namespace vault.Core.Domain
             byte[] nonce = VaultFileFormat.GenerateNonce();
             var header = new VaultFileFormat.Header(
                 VaultFileFormat.MAGIC,
-                VaultFileFormat.ULTRA_STREAMING_VERSION,
+                VaultFileFormat.ULTRA_STREAMING_VERSION_WITH_ID,
                 salt,
-                nonce);
+                nonce,
+                _vaultIdBytes);
 
             string tempPath = vaultPath + ".tmp";
             try
@@ -798,6 +826,10 @@ namespace vault.Core.Domain
 
             _sessionKey = null;
             _salt = null;
+            if (_vaultIdBytes != null && _vaultIdBytes.Length > 0)
+                Array.Clear(_vaultIdBytes, 0, _vaultIdBytes.Length);
+            _vaultIdBytes = null;
+            _needsVaultIdUpgrade = false;
             _currentFilePath = null;
             _storageFormat = VaultStorageFormat.Extended;
         }
@@ -1187,17 +1219,18 @@ namespace vault.Core.Domain
 
         private static byte[] ReadLegacyEncryptedPayloadWithProgress(string path, IProgress<double>? progress)
         {
+            VaultFileFormat.Header header = VaultFileFormat.ReadHeader(path);
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (fs.Length <= VaultFileFormat.HEADER_SIZE)
+            if (fs.Length <= header.Size)
                 throw new InvalidDataException(VaultText.T("core.format.payloadMissing"));
 
-            long payloadLengthLong = fs.Length - VaultFileFormat.HEADER_SIZE;
+            long payloadLengthLong = fs.Length - header.Size;
             if (payloadLengthLong > int.MaxValue)
                 throw new InvalidOperationException(VaultText.T("core.format.vaultTooLargeLegacy"));
 
             int payloadLength = (int)payloadLengthLong;
             var payload = new byte[payloadLength];
-            fs.Position = VaultFileFormat.HEADER_SIZE;
+            fs.Position = header.Size;
 
             int offset = 0;
             var buffer = new byte[LegacyReadBufferSize];
@@ -1421,9 +1454,13 @@ namespace vault.Core.Domain
 
             if (_sessionKey != null)
                 Array.Clear(_sessionKey, 0, _sessionKey.Length);
+            if (_vaultIdBytes != null && _vaultIdBytes.Length > 0)
+                Array.Clear(_vaultIdBytes, 0, _vaultIdBytes.Length);
 
             _sessionKey = null;
             _salt = null;
+            _vaultIdBytes = null;
+            _needsVaultIdUpgrade = false;
             _currentFilePath = null;
             _storageFormat = VaultStorageFormat.Extended;
         }

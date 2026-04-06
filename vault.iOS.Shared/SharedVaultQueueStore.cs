@@ -12,6 +12,7 @@ namespace vault.iOS.Shared
         {
             WriteIndented = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            PropertyNameCaseInsensitive = true,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
             Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
         };
@@ -30,6 +31,8 @@ namespace vault.iOS.Shared
 
         public string PendingImportsRootPath => Path.Combine(_rootPath, "pending-imports");
 
+        public string VaultManifestPath => Path.Combine(_rootPath, "vault.json");
+
         public IReadOnlyList<RecentVaultRecord> LoadRecentVaults()
         {
             RecentVaultRegistryDocument document = ReadJson(RecentVaultsPath, CreateEmptyRecentVaultRegistry);
@@ -37,6 +40,43 @@ namespace vault.iOS.Shared
                 .OrderByDescending(vault => vault.IsPinned)
                 .ThenByDescending(vault => vault.LastOpenedAtUtc)
                 .ToArray();
+        }
+
+        public VaultPendingImportManifest? LoadVaultManifest()
+        {
+            return ReadJson<VaultPendingImportManifest?>(VaultManifestPath, () => null);
+        }
+
+        public void SaveVaultManifest(VaultPendingImportManifest manifest)
+        {
+            if (manifest == null)
+                throw new ArgumentNullException(nameof(manifest));
+
+            NormalizeManifest(manifest);
+            WriteJsonAtomic(VaultManifestPath, manifest);
+        }
+
+        public static VaultPendingImportManifest? TryReadVaultManifest(string? rootPath)
+        {
+            if (string.IsNullOrWhiteSpace(rootPath))
+                return null;
+
+            string manifestPath = Path.Combine(rootPath, "vault.json");
+            if (!File.Exists(manifestPath))
+                return null;
+
+            try
+            {
+                using FileStream input = new(manifestPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                return JsonSerializer.Deserialize<VaultPendingImportManifest>(input, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         public RecentVaultRecord? FindRecentVaultById(string? vaultId)
@@ -90,11 +130,18 @@ namespace vault.iOS.Shared
             }
             else
             {
+                existing.VaultId = record.VaultId;
                 existing.DisplayName = record.DisplayName;
                 existing.LastKnownPath = record.LastKnownPath;
                 existing.BookmarkDataBase64 = string.IsNullOrWhiteSpace(record.BookmarkDataBase64)
                     ? existing.BookmarkDataBase64
                     : record.BookmarkDataBase64;
+                existing.ImportFolderPath = string.IsNullOrWhiteSpace(record.ImportFolderPath)
+                    ? existing.ImportFolderPath
+                    : record.ImportFolderPath;
+                existing.ImportFolderBookmarkDataBase64 = string.IsNullOrWhiteSpace(record.ImportFolderBookmarkDataBase64)
+                    ? existing.ImportFolderBookmarkDataBase64
+                    : record.ImportFolderBookmarkDataBase64;
                 existing.StorageFormat = string.IsNullOrWhiteSpace(record.StorageFormat)
                     ? existing.StorageFormat
                     : record.StorageFormat;
@@ -374,6 +421,19 @@ namespace vault.iOS.Shared
             if (job.CreatedAtUtc <= 0)
                 job.CreatedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             job.UpdatedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        }
+
+        private static void NormalizeManifest(VaultPendingImportManifest manifest)
+        {
+            manifest.SchemaVersion = SchemaVersion;
+            manifest.VaultId = string.IsNullOrWhiteSpace(manifest.VaultId)
+                ? throw new InvalidOperationException("VaultId mancante nel manifest.")
+                : manifest.VaultId.Trim();
+            manifest.DisplayName = string.IsNullOrWhiteSpace(manifest.DisplayName)
+                ? "Vault"
+                : manifest.DisplayName.Trim();
+            manifest.LastKnownPath = NormalizePath(manifest.LastKnownPath);
+            manifest.UpdatedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         }
 
         private T ReadJson<T>(string path, Func<T> defaultFactory)

@@ -1,6 +1,7 @@
 using CoreGraphics;
 using Foundation;
 using UIKit;
+using vault.Core;
 using vault.Core.Domain;
 using vault.iOS.Shared;
 
@@ -188,7 +189,7 @@ namespace vault.iOS.ShareExtension
 
             string? previousSelection = _selectedVaultId;
             _recentVaults.Clear();
-            _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
+            _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaultsMergedWithLocalVaults());
             _selectedVaultId = _recentVaults.Any(vault =>
                 string.Equals(vault.VaultId, previousSelection, StringComparison.OrdinalIgnoreCase))
                 ? previousSelection
@@ -232,7 +233,7 @@ namespace vault.iOS.ShareExtension
             }
 
             _recentVaults.Clear();
-            _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaults());
+            _recentVaults.AddRange(ShareVaultRegistryBridge.LoadPublishedVaultsMergedWithLocalVaults());
             if (string.IsNullOrWhiteSpace(_selectedVaultId) && _recentVaults.Count > 0)
                 _selectedVaultId = _recentVaults.First().VaultId;
 
@@ -248,14 +249,14 @@ namespace vault.iOS.ShareExtension
                     return;
                 }
 
-                RecentVaultRecord manualVault = new()
+                RecentVaultRecord? manualVault = TryBuildManualVaultRecord(manualVaultUrl);
+                if (manualVault == null)
                 {
-                    VaultId = Guid.NewGuid().ToString("N"),
-                    DisplayName = manualVaultUrl.LastPathComponent ?? "Vault",
-                    LastKnownPath = manualVaultUrl.Path ?? string.Empty
-                };
+                    UpdateUiState();
+                    return;
+                }
 
-                await QueueProvidersForVaultAsync(manualVault, providers, manualVaultUrl);
+                await QueueProvidersForVaultAsync(manualVault, providers);
                 UpdateUiState();
                 return;
             }
@@ -267,113 +268,110 @@ namespace vault.iOS.ShareExtension
                 return;
             }
 
-            if (RequiresManualVaultSelection(selectedVault))
-            {
-                NSUrl? manualVaultUrl = await PromptManualVaultSelectionAsync();
-                if (manualVaultUrl == null)
-                {
-                    UpdateUiState();
-                    return;
-                }
-
-                await QueueProvidersForVaultAsync(selectedVault, providers, manualVaultUrl);
-                UpdateUiState();
-                return;
-            }
-
             await QueueProvidersForVaultAsync(selectedVault, providers);
             UpdateUiState();
         }
 
         private async Task QueueProvidersForVaultAsync(
             RecentVaultRecord selectedVault,
-            IReadOnlyList<NSItemProvider> providers,
-            NSUrl? directVaultUrl = null)
+            IReadOnlyList<NSItemProvider> providers)
         {
-            NSUrl vaultUrl;
-            try
-            {
-                vaultUrl = directVaultUrl ?? ResolveVaultUrl(selectedVault);
-            }
-            catch (Exception ex)
-            {
-                ShowError(ex.Message);
-                return;
-            }
-
-            string? vaultPath = vaultUrl.Path;
-            if (string.IsNullOrWhiteSpace(vaultPath))
-            {
-                ShowError("Non riesco a usare il vault selezionato.");
-                return;
-            }
-
-            string queueRootPath;
-            string vaultId;
-            try
-            {
-                queueRootPath = VaultPendingImportLocator.GetQueueRootPath(vaultPath);
-                vaultId = VaultPendingImportLocator.GetVaultId(vaultPath);
-            }
-            catch (Exception ex)
-            {
-                ShowError(ex.Message);
-                return;
-            }
-
             string vaultDisplayName = string.IsNullOrWhiteSpace(selectedVault.DisplayName)
-                ? (vaultUrl.LastPathComponent ?? "Vault")
+                ? "Vault"
                 : selectedVault.DisplayName;
+            bool forceFolderSelection = false;
 
-            List<string> temporaryPaths = new();
-            using var vaultScope = new SecurityScopeAccess(vaultUrl);
-            using var parentScope = new SecurityScopeAccess(vaultUrl.RemoveLastPathComponent());
-
-            SetBusy(true, "Sto preparando i file...");
-
-            try
+            while (true)
             {
-                SharedVaultQueueStore store = new(queueRootPath);
-                PendingImportJob job = store.CreatePendingJob(vaultId, vaultDisplayName);
+                NSUrl? importFolderUrl = forceFolderSelection
+                    ? await PromptImportFolderSelectionAsync(selectedVault)
+                    : await ResolveImportFolderUrlAsync(selectedVault);
+                if (importFolderUrl == null)
+                    return;
 
-                int completed = 0;
-                foreach (NSItemProvider provider in providers)
+                if (forceFolderSelection && !TryBindImportFolder(selectedVault, importFolderUrl))
+                    return;
+
+                string queueRootPath;
+                try
                 {
-                    string tempPath = await LoadProviderToTempPathAsync(provider);
-                    temporaryPaths.Add(tempPath);
-
-                    string originalFileName = BuildQueuedFileName(provider, tempPath);
-                    string stagedPath = store.BuildUniqueStagedFilePath(job.JobId, originalFileName);
-                    File.Copy(tempPath, stagedPath, overwrite: false);
-
-                    job.Items.Add(new PendingImportItem
-                    {
-                        ItemId = Guid.NewGuid().ToString("N"),
-                        OriginalFileName = originalFileName,
-                        StagedRelativePath = store.GetRelativePathForJob(job.JobId, stagedPath),
-                        ContentType = SelectPreferredTypeIdentifier(provider),
-                        FileSize = new FileInfo(stagedPath).Length,
-                        SourceHint = provider.SuggestedName
-                    });
-
-                    completed++;
-                    SetBusy(true, providers.Count == 1
-                        ? "File messo in attesa."
-                        : $"File messi in attesa... ({completed}/{providers.Count})");
+                    queueRootPath = importFolderUrl.Path ?? string.Empty;
+                    if (string.IsNullOrWhiteSpace(queueRootPath))
+                        throw new InvalidOperationException("Non riesco a usare la cartella di attesa selezionata.");
+                }
+                catch (Exception ex)
+                {
+                    ShowError(ex.Message);
+                    return;
                 }
 
-                store.SavePendingJob(job);
-                await CompleteAndCloseAsync();
-            }
-            catch (Exception ex)
-            {
-                ShowError(ex.Message);
-            }
-            finally
-            {
-                SetBusy(false, string.Empty);
-                foreach (string path in temporaryPaths)
-                    TryDeletePath(path);
+                List<string> temporaryPaths = new();
+                using var importScope = new SecurityScopeAccess(importFolderUrl);
+
+                SetBusy(true, "Sto preparando i file...");
+
+                try
+                {
+                    SharedVaultQueueStore store = new(queueRootPath);
+                    store.SaveVaultManifest(new VaultPendingImportManifest
+                    {
+                        VaultId = selectedVault.VaultId,
+                        DisplayName = vaultDisplayName,
+                        LastKnownPath = selectedVault.LastKnownPath ?? string.Empty
+                    });
+
+                    PendingImportJob job = store.CreatePendingJob(selectedVault.VaultId, vaultDisplayName);
+
+                    int completed = 0;
+                    foreach (NSItemProvider provider in providers)
+                    {
+                        string tempPath = await LoadProviderToTempPathAsync(provider);
+                        temporaryPaths.Add(tempPath);
+
+                        string originalFileName = BuildQueuedFileName(provider, tempPath);
+                        string stagedPath = store.BuildUniqueStagedFilePath(job.JobId, originalFileName);
+                        File.Copy(tempPath, stagedPath, overwrite: false);
+
+                        job.Items.Add(new PendingImportItem
+                        {
+                            ItemId = Guid.NewGuid().ToString("N"),
+                            OriginalFileName = originalFileName,
+                            StagedRelativePath = store.GetRelativePathForJob(job.JobId, stagedPath),
+                            ContentType = SelectPreferredTypeIdentifier(provider),
+                            FileSize = new FileInfo(stagedPath).Length,
+                            SourceHint = provider.SuggestedName
+                        });
+
+                        completed++;
+                        SetBusy(true, providers.Count == 1
+                            ? "File messo in attesa."
+                            : $"File messi in attesa... ({completed}/{providers.Count})");
+                    }
+
+                    store.SavePendingJob(job);
+                    ShareVaultRegistryBridge.UpsertAppManagedVault(selectedVault);
+                    await CompleteAndCloseAsync();
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (!forceFolderSelection && RequiresFolderReselection(ex))
+                    {
+                        selectedVault.ImportFolderPath = null;
+                        selectedVault.ImportFolderBookmarkDataBase64 = null;
+                        forceFolderSelection = true;
+                        continue;
+                    }
+
+                    ShowError(ex.Message);
+                    return;
+                }
+                finally
+                {
+                    SetBusy(false, string.Empty);
+                    foreach (string path in temporaryPaths)
+                        TryDeletePath(path);
+                }
             }
         }
 
@@ -490,6 +488,163 @@ namespace vault.iOS.ShareExtension
             picker.Delegate = _pickerDelegate;
             PresentViewController(picker, true, null);
             return tcs.Task;
+        }
+
+        private RecentVaultRecord? TryBuildManualVaultRecord(NSUrl vaultUrl)
+        {
+            using var scope = new SecurityScopeAccess(vaultUrl);
+
+            string? path = vaultUrl.Path;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                ShowError("Non riesco a leggere il vault selezionato.");
+                return null;
+            }
+
+            try
+            {
+                VaultFileFormat.Header header = VaultFileFormat.ReadHeader(path);
+                if (!header.HasVaultId || string.IsNullOrWhiteSpace(header.VaultId))
+                {
+                    ShowError("Apri prima questo vault nell'app principale. Devo aggiornarlo prima di poterlo collegare alla condivisione.");
+                    return null;
+                }
+
+                return new RecentVaultRecord
+                {
+                    VaultId = header.VaultId,
+                    DisplayName = vaultUrl.LastPathComponent ?? "Vault",
+                    LastKnownPath = path
+                };
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex.Message);
+                return null;
+            }
+        }
+
+        private async Task<NSUrl?> ResolveImportFolderUrlAsync(RecentVaultRecord vault)
+        {
+            NSUrl? resolvedUrl = TryResolveImportFolderUrl(vault);
+            if (resolvedUrl != null)
+                return resolvedUrl;
+
+            NSUrl? selectedFolder = await PromptImportFolderSelectionAsync(vault);
+            if (selectedFolder == null)
+                return null;
+
+            if (!TryBindImportFolder(vault, selectedFolder))
+                return null;
+
+            return selectedFolder;
+        }
+
+        private Task<NSUrl?> PromptImportFolderSelectionAsync(RecentVaultRecord vault)
+        {
+            string suggestedFolderName = VaultPendingImportLocator.GetVaultFolderName(vault.DisplayName, vault.VaultId);
+            var tcs = new TaskCompletionSource<NSUrl?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            UIAlertController alert = UIAlertController.Create(
+                "Scegli la cartella di attesa",
+                $"Apri la cartella \"{suggestedFolderName}\" dentro \"{VaultPendingImportLocator.AppImportsRootFolderName}\" nell'app File.",
+                UIAlertControllerStyle.Alert);
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, _ => tcs.TrySetResult(null)));
+            alert.AddAction(UIAlertAction.Create("Apri File", UIAlertActionStyle.Default, _ =>
+            {
+#pragma warning disable CA1422
+                UIDocumentPickerViewController picker = new(new[] { "public.folder" }, UIDocumentPickerMode.Open)
+                {
+                    AllowsMultipleSelection = false
+                };
+#pragma warning restore CA1422
+
+                _pickerDelegate = new PickerDelegate(
+                    urls => tcs.TrySetResult(urls.FirstOrDefault()),
+                    () => tcs.TrySetResult(null));
+
+                picker.Delegate = _pickerDelegate;
+                PresentViewController(picker, true, null);
+            }));
+
+            PresentViewController(alert, true, null);
+            return tcs.Task;
+        }
+
+        private bool TryBindImportFolder(RecentVaultRecord vault, NSUrl folderUrl)
+        {
+            string? folderPath = folderUrl.Path;
+            if (string.IsNullOrWhiteSpace(folderPath))
+            {
+                ShowError("La cartella selezionata non e valida.");
+                return false;
+            }
+
+            using var scope = new SecurityScopeAccess(folderUrl);
+
+            try
+            {
+                SharedVaultQueueStore store = new(folderPath);
+                VaultPendingImportManifest? existingManifest = store.LoadVaultManifest();
+                if (existingManifest != null &&
+                    !string.Equals(existingManifest.VaultId, vault.VaultId, StringComparison.OrdinalIgnoreCase))
+                {
+                    ShowError("La cartella selezionata e gia collegata a un altro vault.");
+                    return false;
+                }
+
+                store.SaveVaultManifest(new VaultPendingImportManifest
+                {
+                    VaultId = vault.VaultId,
+                    DisplayName = string.IsNullOrWhiteSpace(vault.DisplayName) ? "Vault" : vault.DisplayName,
+                    LastKnownPath = vault.LastKnownPath ?? string.Empty
+                });
+
+                vault.ImportFolderPath = folderPath;
+                vault.ImportFolderBookmarkDataBase64 = TryCreateBookmarkDataBase64(folderUrl);
+                ShareVaultRegistryBridge.UpsertAppManagedVault(vault);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex.Message);
+                return false;
+            }
+        }
+
+        private static bool RequiresFolderReselection(Exception ex)
+        {
+            string message = ex.Message ?? string.Empty;
+            return ex is UnauthorizedAccessException ||
+                   message.Contains("UnauthorizedAccess_IODenied", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("Access denied", StringComparison.OrdinalIgnoreCase) ||
+                   message.Contains("accesso", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static NSUrl? TryResolveImportFolderUrl(RecentVaultRecord vault)
+        {
+            if (!string.IsNullOrWhiteSpace(vault.ImportFolderBookmarkDataBase64))
+            {
+                try
+                {
+                    NSData data = NSData.FromArray(Convert.FromBase64String(vault.ImportFolderBookmarkDataBase64));
+                    bool isStale;
+                    NSError? error;
+                    NSUrl? resolved = NSUrl.FromBookmarkData(data, 0, null, out isStale, out error);
+                    if (resolved != null && error == null)
+                        return resolved;
+                }
+                catch
+                {
+                    // Fall back to path.
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(vault.ImportFolderPath))
+                return NSUrl.FromFilename(vault.ImportFolderPath);
+
+            return null;
         }
 
         private static void PrepareSessionForPersist(VaultPortableReader session, RecentVaultRecord record)
@@ -699,6 +854,28 @@ namespace vault.iOS.ShareExtension
             return ".dat";
         }
 
+        private static string? TryCreateBookmarkDataBase64(NSUrl fileUrl)
+        {
+            try
+            {
+                NSError? bookmarkError;
+                NSData bookmarkData = fileUrl.CreateBookmarkData(
+                    0,
+                    null,
+                    null,
+                    out bookmarkError);
+
+                if (bookmarkError != null || bookmarkData == null || bookmarkData.Length <= 0)
+                    return null;
+
+                return Convert.ToBase64String(bookmarkData.ToArray());
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static NSUrl ResolveVaultUrl(RecentVaultRecord vault)
         {
             if (!string.IsNullOrWhiteSpace(vault.BookmarkDataBase64))
@@ -879,9 +1056,6 @@ namespace vault.iOS.ShareExtension
         {
             bool hasRecentVaults = _recentVaults.Count > 0;
             bool hasIncoming = GetIncomingProviders().Count > 0;
-            RecentVaultRecord? selectedVault = _recentVaults.FirstOrDefault(vault =>
-                string.Equals(vault.VaultId, _selectedVaultId, StringComparison.OrdinalIgnoreCase));
-            bool selectedVaultRequiresManualSelection = selectedVault == null || RequiresManualVaultSelection(selectedVault);
 
             if (_emptyLabel != null)
             {
@@ -894,7 +1068,7 @@ namespace vault.iOS.ShareExtension
             if (_confirmButton != null)
             {
                 _confirmButton.Enabled = hasIncoming && !_isBusy;
-                _confirmButton.SetTitle(hasRecentVaults && !selectedVaultRequiresManualSelection ? "Metti in attesa" : "Scegli vault", UIControlState.Normal);
+                _confirmButton.SetTitle(hasRecentVaults ? "Metti in attesa" : "Scegli vault", UIControlState.Normal);
             }
 
             if (_cancelButton != null)
@@ -938,7 +1112,7 @@ namespace vault.iOS.ShareExtension
             if (!string.IsNullOrWhiteSpace(message) &&
                 message.Contains("UnauthorizedAccess_IODenied", StringComparison.OrdinalIgnoreCase))
             {
-                message = "Non riesco a creare la cartella temporanea per questo vault. Scegli di nuovo il file del vault dall'app File e riprova.";
+                message = "Non riesco ad accedere alla cartella di attesa di questo vault. Sceglila di nuovo dall'app File e riprova.";
             }
 
             UIAlertController alert = UIAlertController.Create(
@@ -1007,13 +1181,16 @@ namespace vault.iOS.ShareExtension
 
             private static string BuildSecondaryText(RecentVaultRecord vault)
             {
-                if (RequiresManualVaultSelection(vault))
-                    return "Salvato dentro l'app. Ti chiedero di riselezionare il file, poi i contenuti verranno messi in attesa.";
+                if (string.IsNullOrWhiteSpace(vault.ImportFolderPath) &&
+                    string.IsNullOrWhiteSpace(vault.ImportFolderBookmarkDataBase64))
+                {
+                    return "Cartella di attesa non ancora collegata. Te la chiedero una volta sola.";
+                }
 
-                if (string.IsNullOrWhiteSpace(vault.LastKnownPath))
-                    return "I file verranno messi in attesa per questo vault";
+                if (string.IsNullOrWhiteSpace(vault.ImportFolderPath))
+                    return "I file verranno messi in attesa nella cartella collegata a questo vault.";
 
-                return $"I file verranno messi in attesa per questo vault.\n{vault.LastKnownPath}";
+                return $"I file verranno messi in attesa qui:\n{vault.ImportFolderPath}";
             }
         }
 

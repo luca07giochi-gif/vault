@@ -24,6 +24,8 @@ namespace vault.Core.Domain
         private readonly string _sessionDirectory;
         private readonly Dictionary<Guid, FileContentHandle> _fileContent = new();
         private byte[]? _sessionKey;
+        private byte[] _vaultIdBytes;
+        private bool _needsVaultIdUpgrade;
         private bool _disposed;
 
         private VaultPortableReader(
@@ -31,6 +33,8 @@ namespace vault.Core.Domain
             VaultStorageFormat storageFormat,
             byte[] sessionKey,
             byte[] salt,
+            byte[] vaultIdBytes,
+            bool needsVaultIdUpgrade,
             string sessionDirectory,
             IDictionary<Guid, FileContentHandle>? initialContent)
         {
@@ -38,6 +42,8 @@ namespace vault.Core.Domain
             _storageFormat = storageFormat;
             _sessionKey = sessionKey ?? throw new ArgumentNullException(nameof(sessionKey));
             _salt = salt ?? throw new ArgumentNullException(nameof(salt));
+            _vaultIdBytes = vaultIdBytes?.ToArray() ?? throw new ArgumentNullException(nameof(vaultIdBytes));
+            _needsVaultIdUpgrade = needsVaultIdUpgrade;
             _sessionDirectory = sessionDirectory ?? throw new ArgumentNullException(nameof(sessionDirectory));
 
             Directory.CreateDirectory(_sessionDirectory);
@@ -49,6 +55,8 @@ namespace vault.Core.Domain
         }
 
         public VaultStorageFormat StorageFormat => _storageFormat;
+        public string VaultId => VaultFileFormat.FormatVaultId(_vaultIdBytes);
+        public bool NeedsVaultIdUpgrade => _needsVaultIdUpgrade;
 
         public bool IsDirty { get; private set; }
 
@@ -452,12 +460,14 @@ namespace vault.Core.Domain
                 output.Write(bytes, 0, bytes.Length);
                 Array.Clear(bytes, 0, bytes.Length);
                 IsDirty = false;
+                _needsVaultIdUpgrade = false;
                 return;
             }
 
             bool ultra = _storageFormat == VaultStorageFormat.Ultra;
             SaveStreamingToStream(output, ultra, progress);
             IsDirty = false;
+            _needsVaultIdUpgrade = false;
         }
 
         public static VaultPortableReader Open(
@@ -490,15 +500,14 @@ namespace vault.Core.Domain
             if (vaultStream.CanSeek)
             {
                 vaultStream.Position = 0;
-                if (vaultStream.Length < VaultFileFormat.HEADER_SIZE)
+                if (vaultStream.Length < VaultFileFormat.HEADER_SIZE_LEGACY)
                     throw new InvalidDataException(VaultText.T("core.format.fileTooShort"));
             }
 
             string sessionDirectory = CreateSessionDirectory();
 
             ReportProgress(progress, 2);
-            byte[] headerBytes = ReadExactly(vaultStream, VaultFileFormat.HEADER_SIZE, VaultText.T("core.format.headerIncomplete"));
-            var header = VaultFileFormat.ReadHeaderFromBytes(headerBytes);
+            var header = VaultFileFormat.ReadHeader(vaultStream);
             ReportProgress(progress, 8);
 
             byte[] pwdBytes = Encoding.UTF8.GetBytes(password);
@@ -508,12 +517,17 @@ namespace vault.Core.Domain
                 sessionKey = KeyDerivation.DeriveKey(pwdBytes, header.Salt);
                 ReportProgress(progress, 20);
 
-                VaultStorageFormat format = header.Version switch
+                VaultStorageFormat format = VaultFileFormat.GetStorageKind(header.Version) switch
                 {
-                    VaultFileFormat.LEGACY_VERSION => VaultStorageFormat.Legacy,
-                    VaultFileFormat.ULTRA_STREAMING_VERSION => VaultStorageFormat.Ultra,
+                    VaultFileFormat.VaultStorageKind.Legacy => VaultStorageFormat.Legacy,
+                    VaultFileFormat.VaultStorageKind.Ultra => VaultStorageFormat.Ultra,
                     _ => VaultStorageFormat.Extended
                 };
+
+                byte[] vaultIdBytes = header.HasVaultId
+                    ? header.VaultIdBytes!.ToArray()
+                    : VaultFileFormat.GenerateVaultIdBytes();
+                bool needsVaultIdUpgrade = !header.HasVaultId;
 
                 if (format == VaultStorageFormat.Ultra && !allowUltra)
                     throw new NotSupportedException(VaultText.T("core.error.ultraNotSupportedInWeb"));
@@ -531,6 +545,8 @@ namespace vault.Core.Domain
                     format,
                     sessionKey,
                     header.Salt.ToArray(),
+                    vaultIdBytes,
+                    needsVaultIdUpgrade,
                     sessionDirectory,
                     opened.ContentHandles);
             }
@@ -598,9 +614,10 @@ namespace vault.Core.Domain
             byte[] nonce = VaultFileFormat.GenerateNonce();
             var header = new VaultFileFormat.Header(
                 VaultFileFormat.MAGIC,
-                VaultFileFormat.LEGACY_VERSION,
+                VaultFileFormat.LEGACY_VERSION_WITH_ID,
                 _salt,
-                nonce);
+                nonce,
+                _vaultIdBytes);
 
             ReportProgress(progress, 5);
 
@@ -632,15 +649,16 @@ namespace vault.Core.Domain
                 : PlaintextFormatVersionStandard;
 
             byte version = ultraContent
-                ? VaultFileFormat.ULTRA_STREAMING_VERSION
-                : VaultFileFormat.STREAMING_VERSION;
+                ? VaultFileFormat.ULTRA_STREAMING_VERSION_WITH_ID
+                : VaultFileFormat.STREAMING_VERSION_WITH_ID;
 
             byte[] nonce = VaultFileFormat.GenerateNonce();
             var header = new VaultFileFormat.Header(
                 VaultFileFormat.MAGIC,
                 version,
                 _salt,
-                nonce);
+                nonce,
+                _vaultIdBytes);
 
             using Stream encrypting = VaultFileFormat.CreateStreamingEncryptingWriteStream(output, _sessionKey!, header);
             WritePlaintext(encrypting, ultraContent, CreateScaledProgress(progress, 5, 98));
@@ -802,6 +820,8 @@ namespace vault.Core.Domain
             output.WriteByte(header.Version);
             output.Write(header.Salt, 0, header.Salt.Length);
             output.Write(header.Nonce, 0, header.Nonce.Length);
+            if (header.HasVaultId)
+                output.Write(header.VaultIdBytes!, 0, header.VaultIdBytes!.Length);
         }
 
         private static OpenSessionData ReadLegacy(
@@ -1638,6 +1658,9 @@ namespace vault.Core.Domain
             if (_sessionKey != null && _sessionKey.Length > 0)
                 Array.Clear(_sessionKey, 0, _sessionKey.Length);
             _sessionKey = null;
+            if (_vaultIdBytes.Length > 0)
+                Array.Clear(_vaultIdBytes, 0, _vaultIdBytes.Length);
+            _vaultIdBytes = Array.Empty<byte>();
 
             foreach (FileContentHandle handle in _fileContent.Values)
                 handle.Dispose();

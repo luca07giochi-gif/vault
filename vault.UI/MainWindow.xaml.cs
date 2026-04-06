@@ -592,6 +592,19 @@ namespace vault.UI
                     progress => Task.Run(() => _vaultManager.OpenVault(path, password, progress)),
                     T("main.progress.openingVault"));
 
+                if (_vaultManager.NeedsVaultIdUpgrade)
+                {
+                    MessageBox.Show(
+                        "Questo vault non aveva ancora un identificatore interno. Lo aggiorno subito per renderlo compatibile con la condivisione.",
+                        "Aggiornamento vault",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+
+                    await RunLongOperationAsync(
+                        progress => Task.Run(() => _vaultManager.PersistVaultIdentityUpgrade(progress)),
+                        "Aggiornamento identificatore del vault...");
+                }
+
                 _currentFolderPath = string.Empty;
                 RegisterUserActivity();
                 AggiornaUI();
