@@ -5920,11 +5920,15 @@ namespace vault.iOS
             private bool _cleanedUp;
 
             private UIImage? _currentImage;
+            private UIScrollView? _scrollView;
             private UIImageView? _imageView;
             private UILabel? _counterLabel;
             private UILabel? _hintLabel;
             private UILabel? _errorLabel;
             private UIActivityIndicatorView? _spinner;
+            private UISwipeGestureRecognizer? _swipeLeftGesture;
+            private UISwipeGestureRecognizer? _swipeRightGesture;
+            private ImageZoomScrollDelegate? _scrollDelegate;
 
             public ImageGalleryViewController(
                 MainViewController owner,
@@ -5950,12 +5954,25 @@ namespace vault.iOS
                     (_, _) => DismissViewController(true, null));
                 NavigationItem.RightBarButtonItem = CreateEditButton();
 
+                _scrollView = new UIScrollView
+                {
+                    BackgroundColor = UIColor.Black,
+                    BouncesZoom = true,
+                    MinimumZoomScale = 1f,
+                    MaximumZoomScale = 4f,
+                    ShowsHorizontalScrollIndicator = false,
+                    ShowsVerticalScrollIndicator = false
+                };
+                _scrollDelegate = new ImageZoomScrollDelegate(this);
+                _scrollView.Delegate = _scrollDelegate;
+
                 _imageView = new UIImageView
                 {
-                    ContentMode = UIViewContentMode.ScaleAspectFit,
+                    ContentMode = UIViewContentMode.ScaleToFill,
                     BackgroundColor = UIColor.Black,
                     UserInteractionEnabled = true
                 };
+                _scrollView.AddSubview(_imageView);
 
                 _spinner = new UIActivityIndicatorView(UIActivityIndicatorViewStyle.Large)
                 {
@@ -5975,7 +5992,7 @@ namespace vault.iOS
                     TextColor = UIColor.FromWhiteAlpha(1f, 0.72f),
                     Font = UIFont.SystemFontOfSize(12f),
                     TextAlignment = UITextAlignment.Center,
-                    Text = "Scorri a sinistra/destra"
+                    Text = "Scorri o usa pinch / doppio tocco"
                 };
 
                 _errorLabel = new UILabel
@@ -5987,22 +6004,28 @@ namespace vault.iOS
                     Hidden = true
                 };
 
-                View.AddSubview(_imageView);
+                View.AddSubview(_scrollView);
                 View.AddSubview(_spinner);
                 View.AddSubview(_counterLabel);
                 View.AddSubview(_hintLabel);
                 View.AddSubview(_errorLabel);
 
-                var swipeLeft = new UISwipeGestureRecognizer(() => MoveRelative(+1))
+                var doubleTap = new UITapGestureRecognizer(HandleDoubleTap)
+                {
+                    NumberOfTapsRequired = 2
+                };
+                _scrollView.AddGestureRecognizer(doubleTap);
+
+                _swipeLeftGesture = new UISwipeGestureRecognizer(() => MoveRelative(+1))
                 {
                     Direction = UISwipeGestureRecognizerDirection.Left
                 };
-                var swipeRight = new UISwipeGestureRecognizer(() => MoveRelative(-1))
+                _swipeRightGesture = new UISwipeGestureRecognizer(() => MoveRelative(-1))
                 {
                     Direction = UISwipeGestureRecognizerDirection.Right
                 };
-                View.AddGestureRecognizer(swipeLeft);
-                View.AddGestureRecognizer(swipeRight);
+                View.AddGestureRecognizer(_swipeLeftGesture);
+                View.AddGestureRecognizer(_swipeRightGesture);
 
                 UpdateHeader();
                 _ = LoadCurrentImageAsync();
@@ -6016,12 +6039,21 @@ namespace vault.iOS
 
                 nfloat width = View.Bounds.Width;
                 nfloat height = View.Bounds.Height;
-                _imageView!.Frame = new CGRect(0f, 0f, width, height);
+                CGSize previousScrollSize = _scrollView?.Frame.Size ?? CGSize.Empty;
+                if (_scrollView != null)
+                    _scrollView.Frame = new CGRect(0f, 0f, width, height);
                 _spinner!.Center = new CGPoint(width / 2f, height / 2f);
 
                 _counterLabel!.Frame = new CGRect(20f, height - 72f, width - 40f, 20f);
                 _hintLabel!.Frame = new CGRect(20f, height - 52f, width - 40f, 18f);
                 _errorLabel!.Frame = new CGRect(20f, height - 102f, width - 40f, 42f);
+
+                if (_currentImage != null && _scrollView != null)
+                {
+                    bool boundsChanged = previousScrollSize.Width != _scrollView.Frame.Width ||
+                        previousScrollSize.Height != _scrollView.Frame.Height;
+                    UpdateZoomLayout(resetZoom: boundsChanged);
+                }
             }
 
             public override void ViewDidDisappear(bool animated)
@@ -6100,6 +6132,7 @@ namespace vault.iOS
                         _currentImage?.Dispose();
                         _currentImage = image;
                         _imageView.Image = image;
+                        UpdateZoomLayout(resetZoom: true);
                         _spinner.StopAnimating();
                         if (_errorLabel != null)
                             _errorLabel.Hidden = true;
@@ -6113,6 +6146,10 @@ namespace vault.iOS
                             return;
 
                         _spinner.StopAnimating();
+                        _imageView!.Image = null;
+                        _currentImage?.Dispose();
+                        _currentImage = null;
+                        UpdateZoomLayout(resetZoom: true);
                         if (_errorLabel != null)
                             _errorLabel.Hidden = false;
                         if (_errorLabel != null)
@@ -6224,6 +6261,7 @@ namespace vault.iOS
                 _imageView.Image = null;
                 _currentImage?.Dispose();
                 _currentImage = null;
+                UpdateZoomLayout(resetZoom: true);
                 UpdateHeader();
                 _ = LoadCurrentImageAsync();
             }
@@ -6242,6 +6280,126 @@ namespace vault.iOS
 
                 if (!string.IsNullOrWhiteSpace(ownedPath))
                     MainViewController.TryDeletePath(ownedPath);
+            }
+
+            private void HandleDoubleTap(UITapGestureRecognizer gesture)
+            {
+                if (_scrollView == null || _imageView == null || _currentImage == null)
+                    return;
+
+                nfloat minZoom = _scrollView.MinimumZoomScale;
+                if (_scrollView.ZoomScale > minZoom + 0.01f)
+                {
+                    _scrollView.SetZoomScale(minZoom, true);
+                    return;
+                }
+
+                nfloat targetZoom = NMath.Min(_scrollView.MaximumZoomScale, minZoom * 2.5f);
+                CGPoint tapPoint = gesture.LocationInView(_imageView);
+                CGSize boundsSize = _scrollView.Bounds.Size;
+                nfloat zoomWidth = boundsSize.Width / targetZoom;
+                nfloat zoomHeight = boundsSize.Height / targetZoom;
+                CGRect zoomRect = new CGRect(
+                    tapPoint.X - zoomWidth / 2f,
+                    tapPoint.Y - zoomHeight / 2f,
+                    zoomWidth,
+                    zoomHeight);
+
+                _scrollView.ZoomToRect(zoomRect, true);
+            }
+
+            private void UpdateZoomLayout(bool resetZoom)
+            {
+                if (_scrollView == null || _imageView == null)
+                    return;
+
+                if (_currentImage == null)
+                {
+                    _scrollView.MinimumZoomScale = 1f;
+                    _scrollView.MaximumZoomScale = 4f;
+                    _scrollView.ZoomScale = 1f;
+                    _imageView.Frame = _scrollView.Bounds;
+                    _scrollView.ContentSize = _imageView.Frame.Size;
+                    _scrollView.ContentInset = UIEdgeInsets.Zero;
+                    UpdateZoomInteractionState();
+                    return;
+                }
+
+                CGSize fittedSize = CalculateAspectFitSize(_currentImage.Size, _scrollView.Bounds.Size);
+                _imageView.Frame = new CGRect(0f, 0f, fittedSize.Width, fittedSize.Height);
+                _scrollView.ContentSize = fittedSize;
+                _scrollView.MinimumZoomScale = 1f;
+                _scrollView.MaximumZoomScale = 4f;
+
+                if (resetZoom || _scrollView.ZoomScale < _scrollView.MinimumZoomScale)
+                    _scrollView.ZoomScale = _scrollView.MinimumZoomScale;
+
+                UpdateScrollInsets();
+                UpdateZoomInteractionState();
+            }
+
+            private void UpdateScrollInsets()
+            {
+                if (_scrollView == null || _imageView == null)
+                    return;
+
+                CGSize boundsSize = _scrollView.Bounds.Size;
+                CGRect imageFrame = _imageView.Frame;
+                nfloat horizontalInset = NMath.Max(0f, (boundsSize.Width - imageFrame.Width) / 2f);
+                nfloat verticalInset = NMath.Max(0f, (boundsSize.Height - imageFrame.Height) / 2f);
+                _scrollView.ContentInset = new UIEdgeInsets(verticalInset, horizontalInset, verticalInset, horizontalInset);
+            }
+
+            private void UpdateZoomInteractionState()
+            {
+                bool isZoomed = _scrollView != null && _scrollView.ZoomScale > _scrollView.MinimumZoomScale + 0.01f;
+
+                if (_swipeLeftGesture != null)
+                    _swipeLeftGesture.Enabled = !isZoomed;
+                if (_swipeRightGesture != null)
+                    _swipeRightGesture.Enabled = !isZoomed;
+                if (_hintLabel != null)
+                {
+                    _hintLabel.Text = isZoomed
+                        ? "Doppio tocco per tornare alla vista completa"
+                        : "Scorri o usa pinch / doppio tocco";
+                }
+            }
+
+            private static CGSize CalculateAspectFitSize(CGSize imageSize, CGSize boundsSize)
+            {
+                if (imageSize.Width <= 0f || imageSize.Height <= 0f || boundsSize.Width <= 0f || boundsSize.Height <= 0f)
+                    return boundsSize;
+
+                nfloat scale = NMath.Min(boundsSize.Width / imageSize.Width, boundsSize.Height / imageSize.Height);
+                double scaleValue = scale;
+                if (scale <= 0f || double.IsNaN(scaleValue) || double.IsInfinity(scaleValue))
+                    return boundsSize;
+
+                return new CGSize(
+                    NMath.Max(1f, imageSize.Width * scale),
+                    NMath.Max(1f, imageSize.Height * scale));
+            }
+
+            private sealed class ImageZoomScrollDelegate : UIScrollViewDelegate
+            {
+                private readonly ImageGalleryViewController _owner;
+
+                public ImageZoomScrollDelegate(ImageGalleryViewController owner)
+                {
+                    _owner = owner;
+                }
+
+                public override UIView? ViewForZoomingInScrollView(UIScrollView scrollView)
+                {
+                    return _owner._imageView;
+                }
+
+                public override void DidZoom(UIScrollView scrollView)
+                {
+                    _owner.UpdateScrollInsets();
+                    _owner.UpdateZoomInteractionState();
+                }
             }
         }
 
