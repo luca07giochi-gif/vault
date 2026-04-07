@@ -40,6 +40,8 @@ namespace vault.iOS
         private const long LegacyUltraUpgradeThresholdBytes = 700L * 1024 * 1024;
         private const long PersistSafetyMarginBytes = 96L * 1024 * 1024;
         private const int VaultPersistCopyBufferSize = 1024 * 1024;
+        private const int DraftSummaryEntryLimit = 12;
+        private const int DraftPromptVisibleSummaryLimit = 6;
 
         private enum BrowserViewMode
         {
@@ -67,6 +69,7 @@ namespace vault.iOS
         private readonly HashSet<Guid> _thumbnailLoading = new();
         private readonly SemaphoreSlim _thumbnailSemaphore = new(ThumbnailDecodeConcurrency, ThumbnailDecodeConcurrency);
         private readonly object _thumbnailDiskCacheLock = new();
+        private readonly List<string> _pendingChangeSummary = new();
 
         private VaultPortableReader? _session;
         private NSUrl? _vaultUrl;
@@ -202,10 +205,12 @@ namespace vault.iOS
         {
             ClearThumbnailCache();
             ClearActivePreviewTemporaryFile();
+            TryPersistUnsavedDraftSnapshot();
         }
 
         public void OnAppWillTerminate()
         {
+            TryPersistUnsavedDraftSnapshot();
             CleanupTemporaryRuntimeFiles();
             CloseCurrentVaultSession(reloadUi: false);
         }
@@ -834,6 +839,7 @@ namespace vault.iOS
             _currentVaultRecentId = null;
             _pendingImportPromptVisible = false;
             _manualSaveModeEnabled = false;
+            ClearPendingChangeSummary();
             _isSelectionMode = false;
             _selectedItemIds.Clear();
             _visibleItems.Clear();
@@ -960,6 +966,7 @@ namespace vault.iOS
 
                     Guid folderId = folder.Id;
                     _session.RenameItem(folderId, newName);
+                    RecordPendingChange($"Rinominata la cartella in \"{newName}\".");
                     await PersistVaultAsync();
 
                     VaultFileItem? renamed = _session.Files.FirstOrDefault(item => item.Id == folderId);
@@ -1002,6 +1009,7 @@ namespace vault.iOS
                         return;
 
                     _session.DeleteItems(new[] { folder.Id });
+                    RecordPendingChange($"Eliminata la cartella \"{folder.FileName}\".");
                     await PersistVaultAsync();
                     _currentFolder = NormalizeFolderPath(parentFolder);
                     EnsureCurrentFolderStillExists();
@@ -1120,8 +1128,16 @@ namespace vault.iOS
                 await PersistVaultAsync(progress, force: true);
             });
 
+            if (HasPendingVaultSaveChanges)
+            {
+                UpdateUiState();
+                return false;
+            }
+
+            DeleteCurrentDraftIfPresent();
+            ClearPendingChangeSummary();
             UpdateUiState();
-            return !HasPendingVaultSaveChanges;
+            return true;
         }
 
         private async Task<bool> ConfirmCanLeaveCurrentVaultAsync(
@@ -1159,6 +1175,202 @@ namespace vault.iOS
                 PendingChangesDecision.Discard => discardActionAsync == null ? true : await discardActionAsync(),
                 _ => false
             };
+        }
+
+        private void RecordPendingChange(string summary)
+        {
+            if (!_manualSaveModeEnabled || string.IsNullOrWhiteSpace(summary))
+                return;
+
+            string normalized = summary.Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+                return;
+
+            _pendingChangeSummary.Add(normalized);
+            if (_pendingChangeSummary.Count > DraftSummaryEntryLimit)
+                _pendingChangeSummary.RemoveRange(0, _pendingChangeSummary.Count - DraftSummaryEntryLimit);
+
+            UpdateUiState();
+        }
+
+        private void ClearPendingChangeSummary()
+        {
+            _pendingChangeSummary.Clear();
+        }
+
+        private IReadOnlyList<string> GetDraftChangeSummarySnapshot()
+        {
+            if (_pendingChangeSummary.Count > 0)
+                return _pendingChangeSummary.ToArray();
+
+            if (HasPendingVaultSaveChanges)
+                return new[] { "Modifiche al contenuto del vault non ancora salvate." };
+
+            return Array.Empty<string>();
+        }
+
+        private VaultSessionDraftManifest CreateCurrentDraftManifest()
+        {
+            if (_session == null || _vaultUrl == null)
+                throw new InvalidOperationException("Vault non aperto.");
+
+            string displayName = _vaultUrl.LastPathComponent
+                ?? Path.GetFileName(_vaultUrl.Path ?? string.Empty)
+                ?? "Vault";
+            IReadOnlyList<string> summary = GetDraftChangeSummarySnapshot();
+
+            return new VaultSessionDraftManifest
+            {
+                VaultId = _session.VaultId,
+                DisplayName = displayName,
+                LastKnownPath = _vaultUrl.Path ?? string.Empty,
+                SavedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ChangeCount = summary.Count,
+                ChangeSummary = summary.ToList()
+            };
+        }
+
+        private void TryPersistUnsavedDraftSnapshot()
+        {
+            if (!_manualSaveModeEnabled || !HasPendingVaultSaveChanges || _session == null || _vaultUrl == null)
+                return;
+
+            try
+            {
+                SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: false);
+                if (store == null)
+                    return;
+
+                Directory.CreateDirectory(store.DraftRootPath);
+                PersistVaultToUrl(NSUrl.FromFilename(store.DraftVaultFilePath), _session);
+                store.SaveDraftManifest(CreateCurrentDraftManifest());
+            }
+            catch
+            {
+                // Best effort backup. The prompt on the next open is only shown when the draft was written correctly.
+            }
+        }
+
+        private void DeleteCurrentDraftIfPresent()
+        {
+            try
+            {
+                SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: false);
+                store?.DeleteDraft();
+            }
+            catch
+            {
+                // Best effort cleanup.
+            }
+        }
+
+        private async Task PromptUnsavedDraftForCurrentVaultIfNeededAsync()
+        {
+            if (_session == null || _vaultUrl == null)
+                return;
+
+            SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: false);
+            if (store == null)
+                return;
+
+            VaultSessionDraftManifest? draft = store.LoadDraftManifest();
+            if (draft == null || !File.Exists(store.DraftVaultFilePath))
+            {
+                store.DeleteDraft();
+                return;
+            }
+
+            if (!string.Equals(draft.VaultId, _session.VaultId, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            string message = BuildDraftPromptMessage(draft);
+            var completion = new TaskCompletionSource<PendingChangesDecision>();
+            UIAlertController alert = UIAlertController.Create(
+                "Modifiche recuperate",
+                message,
+                UIAlertControllerStyle.Alert);
+
+            alert.AddAction(UIAlertAction.Create("Piu tardi", UIAlertActionStyle.Cancel, __ =>
+            {
+                completion.TrySetResult(PendingChangesDecision.Cancel);
+            }));
+            alert.AddAction(UIAlertAction.Create("Scarta", UIAlertActionStyle.Destructive, __ =>
+            {
+                completion.TrySetResult(PendingChangesDecision.Discard);
+            }));
+            alert.AddAction(UIAlertAction.Create("Salva", UIAlertActionStyle.Default, __ =>
+            {
+                completion.TrySetResult(PendingChangesDecision.Save);
+            }));
+
+            PresentViewController(alert, true, null);
+
+            PendingChangesDecision decision = await completion.Task;
+            if (decision == PendingChangesDecision.Save)
+            {
+                await ApplyDraftToCurrentVaultAsync(store);
+                return;
+            }
+
+            if (decision == PendingChangesDecision.Discard)
+                store.DeleteDraft();
+        }
+
+        private static string BuildDraftPromptMessage(VaultSessionDraftManifest draft)
+        {
+            var lines = new List<string>();
+            if (draft.SavedAtUtc > 0)
+            {
+                DateTimeOffset savedAt = DateTimeOffset.FromUnixTimeSeconds(draft.SavedAtUtc).ToLocalTime();
+                lines.Add($"Ho trovato una bozza salvata il {savedAt:dd/MM/yyyy HH:mm}.");
+            }
+
+            IReadOnlyList<string> summary = draft.ChangeSummary ?? Array.Empty<string>();
+            if (summary.Count == 0)
+                return string.Join("\n", lines.Append("Vuoi salvare o scartare le modifiche recuperate?"));
+
+            lines.Add("Riepilogo modifiche:");
+            foreach (string item in summary.Take(DraftPromptVisibleSummaryLimit))
+                lines.Add($"- {item}");
+
+            if (summary.Count > DraftPromptVisibleSummaryLimit)
+                lines.Add($"+ altre {summary.Count - DraftPromptVisibleSummaryLimit} modifiche");
+
+            lines.Add("Vuoi salvarle nel vault oppure scartarle?");
+            return string.Join("\n", lines);
+        }
+
+        private async Task ApplyDraftToCurrentVaultAsync(SharedVaultQueueStore store)
+        {
+            if (_vaultUrl == null)
+                return;
+
+            string rollbackPassword = _sessionPassword;
+            string rollbackFolder = _currentFolder;
+            bool applied = false;
+            await RunBusyWithProgressAsync("Salvataggio modifiche recuperate...", async progress =>
+            {
+                await Task.Run(() => ApplyDraftFileToVault(_vaultUrl, store.DraftVaultFilePath, progress));
+                applied = true;
+            });
+
+            if (!applied)
+                return;
+
+            bool restored = false;
+            await RunBusyAsync("Riapertura vault...", async () =>
+            {
+                await RestoreSessionFromDiskAsync(rollbackPassword, rollbackFolder);
+                restored = true;
+            });
+
+            if (!restored)
+                return;
+
+            store.DeleteDraft();
+            ClearPendingChangeSummary();
+            _manualSaveModeEnabled = false;
+            ReloadFolderItems();
         }
 
         private static string GetPreviewPerformanceLabel(PreviewPerformanceMode mode)
@@ -1817,6 +2029,7 @@ namespace vault.iOS
 
             _ = RunBusyAsync("Aggiornamento cartelle...", async () =>
             {
+                RecordPendingChange("Aggiornata la struttura cartelle.");
                 await PersistVaultAsync();
                 ReloadFolderItems();
             });
@@ -1914,6 +2127,9 @@ namespace vault.iOS
                     ReportProgress(progress, 6d);
                     EnsureDestinationFolderExistsForMove(normalizedDestination, createdFolderIds);
                     _session.MoveItems(selectedIds, normalizedDestination);
+                    RecordPendingChange(selectedIds.Length == 1
+                        ? "Spostato 1 elemento."
+                        : $"Spostati {selectedIds.Length} elementi.");
                     ReportProgress(progress, 18d);
                     await PersistVaultAsync(CreateScaledProgress(progress, 20d, 100d));
                     EnsureCurrentFolderStillExists();
@@ -1994,6 +2210,9 @@ namespace vault.iOS
                         return;
 
                     _session.DeleteItems(selectedIds);
+                    RecordPendingChange(selectedIds.Length == 1
+                        ? "Eliminato 1 elemento."
+                        : $"Eliminati {selectedIds.Length} elementi.");
                     await PersistVaultAsync();
                     EnsureCurrentFolderStillExists();
                     ExitSelectionMode(clearSelection: true);
@@ -2166,11 +2385,21 @@ namespace vault.iOS
 
             string rollbackPassword = _sessionPassword;
             string rollbackFolder = _currentFolder;
+            bool restored = false;
             await RunBusyAsync("Ripristino vault...", async () =>
             {
                 await RestoreSessionFromDiskAsync(rollbackPassword, rollbackFolder);
+                restored = true;
             });
 
+            if (!restored)
+            {
+                UpdateUiState();
+                return false;
+            }
+
+            DeleteCurrentDraftIfPresent();
+            ClearPendingChangeSummary();
             UpdateUiState();
             return !HasPendingVaultSaveChanges;
         }
@@ -2502,6 +2731,7 @@ namespace vault.iOS
                     {
                         VaultFileItem created = _session.CreateFolder(name, _currentFolder);
                         createdId = created.Id;
+                        RecordPendingChange($"Creata la cartella \"{name}\".");
                         ReportProgress(progress, 15d);
                         await PersistVaultAsync(CreateScaledProgress(progress, 18d, 100d));
                         ReloadFolderItems();
@@ -2619,6 +2849,7 @@ namespace vault.iOS
                 _sessionPassword = password;
                 _currentFolder = string.Empty;
                 _manualSaveModeEnabled = false;
+                ClearPendingChangeSummary();
                 _isSelectionMode = false;
                 _selectedItemIds.Clear();
                 ClearThumbnailCache();
@@ -2646,6 +2877,7 @@ namespace vault.iOS
             }
 
             RegisterCurrentVaultAsRecent();
+            await PromptUnsavedDraftForCurrentVaultIfNeededAsync();
             PromptPendingImportsForCurrentVaultIfNeeded();
         }
 
@@ -2665,6 +2897,9 @@ namespace vault.iOS
                     await Task.Run(() => AddFileFromUrl(session, url, _currentFolder));
                 }
 
+                RecordPendingChange(urls.Length == 1
+                    ? "Aggiunto 1 file."
+                    : $"Aggiunti {urls.Length} file.");
                 await PersistVaultAsync();
                 ReloadFolderItems();
             });
@@ -2692,6 +2927,9 @@ namespace vault.iOS
                     }
                 }
 
+                RecordPendingChange(results.Length == 1
+                    ? "Aggiunto 1 elemento dalla libreria foto."
+                    : $"Aggiunti {results.Length} elementi dalla libreria foto.");
                 await PersistVaultAsync();
                 ReloadFolderItems();
             });
@@ -2833,6 +3071,7 @@ namespace vault.iOS
 
                             session.DeleteItems(new[] { originalId });
                             session.RenameItem(rotatedId, rotatedName);
+                            RecordPendingChange($"Ruotata l'immagine \"{item.FileName}\".");
                             await PersistVaultAsync(CreateScaledProgress(progress, 52d, 100d));
                             EnsureCurrentFolderStillExists();
                             ReloadFolderItems();
@@ -2917,6 +3156,7 @@ namespace vault.iOS
                     rootFolderId = extractionRoot.Id;
 
                     await Task.Run(() => ExtractArchiveIntoFolder(session, sourcePath, extractionRoot.FullPath, progress));
+                    RecordPendingChange($"Estratto l'archivio \"{item.FileName}\".");
 
                     ReportProgress(progress, 88d);
                     await PersistVaultAsync(CreateScaledProgress(progress, 88d, 100d));
@@ -3017,6 +3257,9 @@ namespace vault.iOS
                 VaultFileItem added = await Task.Run(() => session.AddFileFromPath(editedTempPath, sourceItem.ParentPath));
                 addedId = added.Id;
                 session.RenameItem(addedId, outputName);
+                RecordPendingChange(overwrite
+                    ? $"Modificata l'immagine \"{sourceItem.FileName}\"."
+                    : $"Salvata una copia modificata di \"{sourceItem.FileName}\".");
 
                 if (overwrite)
                 {
@@ -3126,6 +3369,7 @@ namespace vault.iOS
                         return;
 
                     _session.RenameItem(item.Id, newName);
+                    RecordPendingChange($"Rinominato \"{item.FileName}\" in \"{newName}\".");
                     await PersistVaultAsync();
                     ReloadFolderItems();
                 });
@@ -3163,6 +3407,7 @@ namespace vault.iOS
                             return;
 
                         _session.MoveItems(new[] { item.Id }, folder);
+                        RecordPendingChange($"Spostato \"{item.FileName}\".");
                         ReportProgress(progress, 14d);
                         await PersistVaultAsync(CreateScaledProgress(progress, 18d, 100d));
                         EnsureCurrentFolderStillExists();
@@ -3195,6 +3440,7 @@ namespace vault.iOS
                         return;
 
                     _session.DeleteItems(new[] { item.Id });
+                    RecordPendingChange($"Eliminato \"{item.FileName}\".");
                     await PersistVaultAsync();
                     EnsureCurrentFolderStillExists();
                     ReloadFolderItems();
@@ -3217,6 +3463,12 @@ namespace vault.iOS
             PrepareSessionForPersist(session);
             EnsureEnoughFreeSpaceForPersist(session, vaultUrl);
             await Task.Run(() => PersistVaultToUrl(vaultUrl, session, progress));
+
+            if (force && _manualSaveModeEnabled && !HasPendingVaultSaveChanges)
+            {
+                DeleteCurrentDraftIfPresent();
+                ClearPendingChangeSummary();
+            }
         }
 
         private static void PrepareSessionForPersist(VaultPortableReader session)
@@ -3850,6 +4102,98 @@ namespace vault.iOS
                 if (success)
                     TryDeletePath(swapBackupPath ?? string.Empty);
             }
+        }
+
+        private static void ApplyDraftFileToVault(NSUrl fileUrl, string draftFilePath, IProgress<double>? progress = null)
+        {
+            using var scope = new SecurityScopeAccess(fileUrl);
+
+            string? destinationPath = fileUrl.Path;
+            if (string.IsNullOrWhiteSpace(destinationPath))
+                throw new IOException("Percorso file non valido.");
+            if (string.IsNullOrWhiteSpace(draftFilePath) || !File.Exists(draftFilePath))
+                throw new FileNotFoundException("Bozza del vault non trovata.", draftFilePath);
+
+            string fileName = Path.GetFileName(destinationPath);
+            string? destinationDirectory = Path.GetDirectoryName(destinationPath);
+            string tmpPath = CreateVaultWriteTempPathNearDestination(destinationPath, fileName, ".tmp", out bool tmpNearDestination);
+            string backupPath = CreateVaultWriteTempPath(
+                fileName,
+                ".bak",
+                tmpNearDestination ? destinationDirectory : null);
+            string? swapBackupPath = null;
+            bool success = false;
+
+            try
+            {
+                CopyFileWithProgress(draftFilePath, tmpPath, progress, 0d, 72d);
+
+                if (!File.Exists(destinationPath))
+                {
+                    if (!TryMoveWithOverwrite(tmpPath, destinationPath))
+                        File.Move(tmpPath, destinationPath);
+
+                    ReportProgress(progress, 100d);
+                    success = true;
+                    return;
+                }
+
+                ReportProgress(progress, 78d);
+                if (TryMoveWithOverwrite(tmpPath, destinationPath))
+                {
+                    ReportProgress(progress, 100d);
+                    success = true;
+                    return;
+                }
+
+                ReportProgress(progress, 84d);
+                if (tmpNearDestination && TrySwapWithRenamedBackup(tmpPath, destinationPath, out swapBackupPath))
+                {
+                    ReportProgress(progress, 100d);
+                    success = true;
+                    return;
+                }
+
+                ReportProgress(progress, 90d);
+                if (TryReplaceFile(tmpPath, destinationPath, backupPath))
+                {
+                    ReportProgress(progress, 100d);
+                    success = true;
+                    return;
+                }
+
+                OverwriteFileWithRollback(tmpPath, destinationPath, backupPath);
+                ReportProgress(progress, 100d);
+                success = true;
+            }
+            finally
+            {
+                TryDeletePath(tmpPath);
+                TryDeletePath(backupPath);
+                if (success)
+                    TryDeletePath(swapBackupPath ?? string.Empty);
+            }
+        }
+
+        private static void CopyFileWithProgress(string sourcePath, string destinationPath, IProgress<double>? progress, double startPercent, double endPercent)
+        {
+            using var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, VaultPersistCopyBufferSize, FileOptions.SequentialScan);
+            using var output = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, VaultPersistCopyBufferSize, FileOptions.SequentialScan);
+
+            long totalBytes = Math.Max(1L, input.Length);
+            long copiedBytes = 0L;
+            byte[] buffer = new byte[VaultPersistCopyBufferSize];
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                output.Write(buffer, 0, read);
+                copiedBytes += read;
+                double ratio = copiedBytes / (double)totalBytes;
+                double mapped = startPercent + ((endPercent - startPercent) * ratio);
+                ReportProgress(progress, mapped);
+            }
+
+            output.Flush(flushToDisk: true);
         }
 
         private static string CreateVaultWriteTempPathNearDestination(

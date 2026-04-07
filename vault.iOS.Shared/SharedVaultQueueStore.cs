@@ -33,6 +33,12 @@ namespace vault.iOS.Shared
 
         public string VaultManifestPath => Path.Combine(_rootPath, "vault.json");
 
+        public string DraftRootPath => Path.Combine(_rootPath, "modifiche-non-salvate");
+
+        public string DraftManifestPath => Path.Combine(DraftRootPath, "draft.json");
+
+        public string DraftVaultFilePath => Path.Combine(DraftRootPath, "bozza.vault");
+
         public IReadOnlyList<RecentVaultRecord> LoadRecentVaults()
         {
             RecentVaultRegistryDocument document = ReadJson(RecentVaultsPath, CreateEmptyRecentVaultRegistry);
@@ -47,6 +53,11 @@ namespace vault.iOS.Shared
             return ReadJson<VaultPendingImportManifest?>(VaultManifestPath, () => null);
         }
 
+        public VaultSessionDraftManifest? LoadDraftManifest()
+        {
+            return ReadJson<VaultSessionDraftManifest?>(DraftManifestPath, () => null);
+        }
+
         public void SaveVaultManifest(VaultPendingImportManifest manifest)
         {
             if (manifest == null)
@@ -54,6 +65,24 @@ namespace vault.iOS.Shared
 
             NormalizeManifest(manifest);
             WriteJsonAtomic(VaultManifestPath, manifest);
+        }
+
+        public void SaveDraftManifest(VaultSessionDraftManifest manifest)
+        {
+            if (manifest == null)
+                throw new ArgumentNullException(nameof(manifest));
+
+            NormalizeDraftManifest(manifest);
+            Directory.CreateDirectory(DraftRootPath);
+            WriteJsonAtomic(DraftManifestPath, manifest);
+        }
+
+        public void DeleteDraft()
+        {
+            if (!Directory.Exists(DraftRootPath))
+                return;
+
+            Directory.Delete(DraftRootPath, recursive: true);
         }
 
         public static VaultPendingImportManifest? TryReadVaultManifest(string? rootPath)
@@ -434,6 +463,28 @@ namespace vault.iOS.Shared
                 : manifest.DisplayName.Trim();
             manifest.LastKnownPath = NormalizePath(manifest.LastKnownPath);
             manifest.UpdatedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        }
+
+        private static void NormalizeDraftManifest(VaultSessionDraftManifest manifest)
+        {
+            manifest.SchemaVersion = SchemaVersion;
+            manifest.VaultId = string.IsNullOrWhiteSpace(manifest.VaultId)
+                ? throw new InvalidOperationException("VaultId mancante nella bozza.")
+                : manifest.VaultId.Trim();
+            manifest.DisplayName = string.IsNullOrWhiteSpace(manifest.DisplayName)
+                ? "Vault"
+                : manifest.DisplayName.Trim();
+            manifest.LastKnownPath = NormalizePath(manifest.LastKnownPath);
+            manifest.ChangeSummary ??= new List<string>();
+            manifest.ChangeSummary = manifest.ChangeSummary
+                .Where(item => !string.IsNullOrWhiteSpace(item))
+                .Select(item => item.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            manifest.ChangeCount = manifest.ChangeSummary.Count;
+            manifest.SavedAtUtc = manifest.SavedAtUtc <= 0
+                ? DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                : manifest.SavedAtUtc;
         }
 
         private T ReadJson<T>(string path, Func<T> defaultFactory)
