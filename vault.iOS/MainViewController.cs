@@ -102,6 +102,7 @@ namespace vault.iOS
         private UILabel? _busyLabel;
         private UIProgressView? _busyProgressView;
         private UILabel? _busyProgressPercentLabel;
+        private CancellationTokenSource? _busyPseudoProgressCts;
 
         private UIView? _pathTitleContainer;
         private UIButton? _pathTitleButton;
@@ -3694,10 +3695,13 @@ namespace vault.iOS
 
         private async Task RunBusyAsync(string message, Func<Task> action)
         {
-            SetBusyState(true, message);
+            SetBusyState(true, message, showProgress: true);
+            StartBusyPseudoProgress();
             try
             {
                 await action();
+                StopBusyPseudoProgress();
+                UpdateBusyProgress(100d);
             }
             catch (OutOfMemoryException)
             {
@@ -3709,6 +3713,7 @@ namespace vault.iOS
             }
             finally
             {
+                StopBusyPseudoProgress();
                 SetBusyState(false, string.Empty);
             }
         }
@@ -3767,6 +3772,66 @@ namespace vault.iOS
                 _busyIndicator.StartAnimating();
             else
                 _busyIndicator.StopAnimating();
+        }
+
+        private void StartBusyPseudoProgress()
+        {
+            StopBusyPseudoProgress();
+
+            var cts = new CancellationTokenSource();
+            _busyPseudoProgressCts = cts;
+            UpdateBusyProgress(0d);
+
+            _ = Task.Run(async () =>
+            {
+                double current = 0d;
+                try
+                {
+                    while (!cts.Token.IsCancellationRequested)
+                    {
+                        await Task.Delay(140, cts.Token);
+                        current = GetNextBusyPseudoProgress(current);
+                        UpdateBusyProgress(current);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            });
+        }
+
+        private void StopBusyPseudoProgress()
+        {
+            CancellationTokenSource? cts = Interlocked.Exchange(ref _busyPseudoProgressCts, null);
+            if (cts == null)
+                return;
+
+            try
+            {
+                cts.Cancel();
+            }
+            catch
+            {
+            }
+
+            cts.Dispose();
+        }
+
+        private static double GetNextBusyPseudoProgress(double currentPercent)
+        {
+            double clamped = Math.Max(0d, Math.Min(96d, currentPercent));
+            if (clamped < 24d)
+                return clamped + 8d;
+            if (clamped < 52d)
+                return clamped + 5d;
+            if (clamped < 74d)
+                return clamped + 3d;
+            if (clamped < 88d)
+                return clamped + 1.4d;
+            if (clamped < 95d)
+                return clamped + 0.6d;
+
+            return 96d;
         }
 
         private void UpdateBusyProgress(double percent)
@@ -6699,6 +6764,23 @@ namespace vault.iOS
             private void UpdateZoomInteractionState()
             {
                 bool isZoomed = _scrollView != null && _scrollView.ZoomScale > _scrollView.MinimumZoomScale + 0.01f;
+
+                if (_scrollView != null)
+                {
+                    _scrollView.ScrollEnabled = isZoomed;
+                    _scrollView.Bounces = isZoomed;
+                    _scrollView.AlwaysBounceVertical = isZoomed;
+                    _scrollView.AlwaysBounceHorizontal = isZoomed;
+                    _scrollView.PanGestureRecognizer.Enabled = isZoomed;
+
+                    if (!isZoomed)
+                    {
+                        CGPoint centeredOffset = new CGPoint(
+                            -_scrollView.ContentInset.Left,
+                            -_scrollView.ContentInset.Top);
+                        _scrollView.SetContentOffset(centeredOffset, false);
+                    }
+                }
 
                 if (_swipeLeftGesture != null)
                     _swipeLeftGesture.Enabled = !isZoomed;
