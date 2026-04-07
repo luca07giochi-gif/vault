@@ -1325,7 +1325,9 @@ namespace vault.iOS
                 lines.Add($"Ho trovato una bozza salvata il {savedAt:dd/MM/yyyy HH:mm}.");
             }
 
-            IReadOnlyList<string> summary = draft.ChangeSummary ?? Array.Empty<string>();
+            IReadOnlyList<string> summary = draft.ChangeSummary is { Count: > 0 }
+                ? draft.ChangeSummary
+                : Array.Empty<string>();
             if (summary.Count == 0)
                 return string.Join("\n", lines.Append("Vuoi salvare o scartare le modifiche recuperate?"));
 
