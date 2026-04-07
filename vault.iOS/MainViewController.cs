@@ -53,6 +53,13 @@ namespace vault.iOS
             Compact
         }
 
+        private enum PendingChangesDecision
+        {
+            Cancel,
+            Discard,
+            Save
+        }
+
         private readonly List<VaultFileItem> _visibleItems = new();
         private readonly HashSet<string> _temporaryFiles = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<Guid> _selectedItemIds = new();
@@ -110,6 +117,13 @@ namespace vault.iOS
         private string? _sharedQueueRootPath;
         private string? _currentVaultRecentId;
         private bool _pendingImportPromptVisible;
+        private bool _manualSaveModeEnabled;
+
+        private bool HasPendingVaultSaveChanges =>
+            _session != null && (_session.IsDirty || _session.NeedsVaultIdUpgrade);
+
+        private bool ShouldShowUnsavedChangesIndicator =>
+            _session != null && _manualSaveModeEnabled && HasPendingVaultSaveChanges;
 
         public static void CleanupStaleRuntimeTemporaryFiles()
         {
@@ -563,6 +577,7 @@ namespace vault.iOS
                 : "Cassaforte iOS";
 
             Title = titlePath;
+            NavigationItem.Prompt = ShouldShowUnsavedChangesIndicator ? "Modifiche non salvate" : null;
 
             if (_pathTitleButton != null)
             {
@@ -773,6 +788,26 @@ namespace vault.iOS
             if (_session == null)
                 return;
 
+            _ = PromptCloseVaultAsync();
+        }
+
+        private async Task PromptCloseVaultAsync()
+        {
+            if (_session == null)
+                return;
+
+            if (HasPendingVaultSaveChanges)
+            {
+                bool canClose = await ConfirmCanLeaveCurrentVaultAsync(
+                    "Chiudi vault",
+                    "Ci sono modifiche non salvate. Vuoi salvarle prima di chiudere il vault?",
+                    "Salva e chiudi",
+                    "Chiudi senza salvare");
+                if (canClose)
+                    CloseCurrentVaultSession(reloadUi: true);
+                return;
+            }
+
             UIAlertController alert = UIAlertController.Create(
                 "Chiudi vault",
                 "Vuoi chiudere il vault corrente?",
@@ -798,6 +833,7 @@ namespace vault.iOS
             _currentFolder = string.Empty;
             _currentVaultRecentId = null;
             _pendingImportPromptVisible = false;
+            _manualSaveModeEnabled = false;
             _isSelectionMode = false;
             _selectedItemIds.Clear();
             _visibleItems.Clear();
@@ -998,6 +1034,22 @@ namespace vault.iOS
                     __ => OpenStorageFormatMenu()));
                 sheet.AddAction(UIAlertAction.Create("Cambia password", UIAlertActionStyle.Default, __ => PromptChangePassword()));
 
+                if (_manualSaveModeEnabled)
+                {
+                    string saveLabel = HasPendingVaultSaveChanges
+                        ? "Salva modifiche"
+                        : "Salva modifiche (nessuna in attesa)";
+                    sheet.AddAction(UIAlertAction.Create(saveLabel, UIAlertActionStyle.Default, __ => _ = SaveVaultChangesNowAsync()));
+                    sheet.AddAction(UIAlertAction.Create("Torna al salvataggio automatico", UIAlertActionStyle.Default, __ => _ = RestoreAutomaticSaveModeAsync()));
+                }
+                else
+                {
+                    sheet.AddAction(UIAlertAction.Create(
+                        "Raggruppa modifiche e salva manualmente",
+                        UIAlertActionStyle.Default,
+                        __ => EnableManualSaveMode()));
+                }
+
                 string selectLabel = _isSelectionMode ? "Fine selezione" : "Selezione multipla";
                 sheet.AddAction(UIAlertAction.Create(selectLabel, UIAlertActionStyle.Default, __ => ToggleSelectionModeFromBottomMenu()));
 
@@ -1013,6 +1065,100 @@ namespace vault.iOS
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             ConfigurePopover(sheet);
             PresentViewController(sheet, true, null);
+        }
+
+        private void EnableManualSaveMode()
+        {
+            if (_session == null || _manualSaveModeEnabled)
+                return;
+
+            _manualSaveModeEnabled = true;
+            ShowSimpleAlert(
+                "Salvataggio manuale attivo",
+                "Da adesso le modifiche resteranno aperte finche non scegli \"Salva modifiche\" dal menu impostazioni.");
+        }
+
+        private async Task RestoreAutomaticSaveModeAsync()
+        {
+            if (_session == null || !_manualSaveModeEnabled)
+                return;
+
+            if (HasPendingVaultSaveChanges)
+            {
+                bool saved = await SaveVaultChangesInternalAsync("Salvataggio modifiche...");
+                if (!saved)
+                    return;
+            }
+
+            _manualSaveModeEnabled = false;
+            ShowSimpleAlert(
+                "Salvataggio automatico attivo",
+                "Da ora le modifiche torneranno a essere salvate subito.");
+        }
+
+        private async Task SaveVaultChangesNowAsync()
+        {
+            if (_session == null)
+                return;
+
+            if (!HasPendingVaultSaveChanges)
+            {
+                ShowSimpleAlert("Nessuna modifica da salvare", "Il vault e gia aggiornato.");
+                return;
+            }
+
+            await SaveVaultChangesInternalAsync("Salvataggio modifiche...");
+        }
+
+        private async Task<bool> SaveVaultChangesInternalAsync(string busyMessage)
+        {
+            if (!HasPendingVaultSaveChanges)
+                return true;
+
+            await RunBusyWithProgressAsync(busyMessage, async progress =>
+            {
+                await PersistVaultAsync(progress, force: true);
+            });
+
+            UpdateUiState();
+            return !HasPendingVaultSaveChanges;
+        }
+
+        private async Task<bool> ConfirmCanLeaveCurrentVaultAsync(
+            string title,
+            string message,
+            string saveActionTitle,
+            string discardActionTitle,
+            Func<Task<bool>>? discardActionAsync = null)
+        {
+            if (!HasPendingVaultSaveChanges)
+                return true;
+
+            var completion = new TaskCompletionSource<PendingChangesDecision>();
+            UIAlertController alert = UIAlertController.Create(title, message, UIAlertControllerStyle.Alert);
+
+            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, __ =>
+            {
+                completion.TrySetResult(PendingChangesDecision.Cancel);
+            }));
+            alert.AddAction(UIAlertAction.Create(discardActionTitle, UIAlertActionStyle.Destructive, __ =>
+            {
+                completion.TrySetResult(PendingChangesDecision.Discard);
+            }));
+            alert.AddAction(UIAlertAction.Create(saveActionTitle, UIAlertActionStyle.Default, __ =>
+            {
+                completion.TrySetResult(PendingChangesDecision.Save);
+            }));
+
+            PresentViewController(alert, true, null);
+
+            PendingChangesDecision decision = await completion.Task;
+            return decision switch
+            {
+                PendingChangesDecision.Save => await SaveVaultChangesInternalAsync("Salvataggio modifiche..."),
+                PendingChangesDecision.Discard => discardActionAsync == null ? true : await discardActionAsync(),
+                _ => false
+            };
         }
 
         private static string GetPreviewPerformanceLabel(PreviewPerformanceMode mode)
@@ -1143,7 +1289,7 @@ namespace vault.iOS
                 _session.ChangeStorageFormat(newFormat);
                 try
                 {
-                    await PersistVaultAsync(progress);
+                    await PersistVaultAsync(progress, force: true);
                 }
                 catch
                 {
@@ -1231,7 +1377,7 @@ namespace vault.iOS
                 _session.ChangePassword(newPassword);
                 try
                 {
-                    await PersistVaultAsync(progress);
+                    await PersistVaultAsync(progress, force: true);
                 }
                 catch
                 {
@@ -1628,7 +1774,7 @@ namespace vault.iOS
                         }
                     }
 
-                    await PersistVaultAsync(CreateScaledProgress(progress, 70d, 100d));
+                    await PersistVaultAsync(CreateScaledProgress(progress, 70d, 100d), force: true);
                     EnsureCurrentFolderStillExists();
                     ReloadFolderItems();
                 }
@@ -1976,6 +2122,16 @@ namespace vault.iOS
 
         private async Task PickVaultToOpenAsync()
         {
+            if (!await ConfirmCanLeaveCurrentVaultAsync(
+                    "Apri un altro vault",
+                    "Ci sono modifiche non salvate nel vault aperto. Vuoi salvarle prima di aprirne un altro?",
+                    "Salva e continua",
+                    "Continua senza salvare",
+                    DiscardPendingChangesForCurrentVaultAsync))
+            {
+                return;
+            }
+
             PresentDocumentPicker(
                 allowsMultipleSelection: false,
                 onPicked: urls =>
@@ -1991,6 +2147,32 @@ namespace vault.iOS
                 });
 
             await Task.CompletedTask;
+        }
+
+        private async Task<bool> DiscardPendingChangesForCurrentVaultAsync()
+        {
+            if (!HasPendingVaultSaveChanges)
+                return true;
+            if (_vaultUrl == null)
+            {
+                ShowError("Non riesco a trovare il vault selezionato.");
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(_sessionPassword))
+            {
+                ShowError("Password sessione non disponibile. Riapri il vault.");
+                return false;
+            }
+
+            string rollbackPassword = _sessionPassword;
+            string rollbackFolder = _currentFolder;
+            await RunBusyAsync("Ripristino vault...", async () =>
+            {
+                await RestoreSessionFromDiskAsync(rollbackPassword, rollbackFolder);
+            });
+
+            UpdateUiState();
+            return !HasPendingVaultSaveChanges;
         }
 
         private void PromptCreateVaultSettingsMenu()
@@ -2436,6 +2618,7 @@ namespace vault.iOS
                 _sharedQueueRootPath = null;
                 _sessionPassword = password;
                 _currentFolder = string.Empty;
+                _manualSaveModeEnabled = false;
                 _isSelectionMode = false;
                 _selectedItemIds.Clear();
                 ClearThumbnailCache();
@@ -2455,7 +2638,7 @@ namespace vault.iOS
                     "Questo vault non aveva ancora un identificatore interno. Lo aggiorno ora per renderlo compatibile con la condivisione.");
                 await RunBusyWithProgressAsync("Aggiornamento vault...", async progress =>
                 {
-                    await PersistVaultAsync(progress);
+                    await PersistVaultAsync(progress, force: true);
                 });
 
                 if (_session.NeedsVaultIdUpgrade)
@@ -3021,9 +3204,11 @@ namespace vault.iOS
             PresentViewController(alert, true, null);
         }
 
-        private async Task PersistVaultAsync(IProgress<double>? progress = null)
+        private async Task PersistVaultAsync(IProgress<double>? progress = null, bool force = false)
         {
             if (_session == null || _vaultUrl == null || (!_session.IsDirty && !_session.NeedsVaultIdUpgrade))
+                return;
+            if (!force && _manualSaveModeEnabled)
                 return;
 
             VaultPortableReader session = _session;
