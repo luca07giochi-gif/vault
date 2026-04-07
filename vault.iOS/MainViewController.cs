@@ -3001,6 +3001,17 @@ namespace vault.iOS
             {
                 _ = OpenFileAsync(item);
             }));
+            if (IsImagePreviewCandidate(item.FileName))
+            {
+                sheet.AddAction(UIAlertAction.Create("Ruota a sinistra", UIAlertActionStyle.Default, __ =>
+                {
+                    _ = OpenImageEditorAsync(item, initialQuarterTurns: -1);
+                }));
+                sheet.AddAction(UIAlertAction.Create("Ruota a destra", UIAlertActionStyle.Default, __ =>
+                {
+                    _ = OpenImageEditorAsync(item, initialQuarterTurns: 1);
+                }));
+            }
             if (IsArchiveExtractionCandidate(item.FileName))
             {
                 sheet.AddAction(UIAlertAction.Create("Estrai in cartella", UIAlertActionStyle.Default, __ =>
@@ -3133,6 +3144,39 @@ namespace vault.iOS
             {
                 (string localPath, bool deleteOnClose) = await Task.Run(() => ResolvePlaybackPath(_session, item));
                 PresentInAppVideoPlayer(localPath, item.FileName, deleteOnClose);
+            });
+        }
+
+        private async Task OpenImageEditorAsync(VaultFileItem item, int initialQuarterTurns = 0)
+        {
+            if (_session == null || item.IsFolder || !IsImagePreviewCandidate(item.FileName))
+                return;
+
+            await RunBusyAsync("Preparazione modifica...", async () =>
+            {
+                string tempPath = await Task.Run(() => WriteTemporaryFileFromVault(_session, item));
+                try
+                {
+                    UIImage? image = await Task.Run(() => LoadFullResolutionImage(tempPath));
+                    if (image == null)
+                        throw new InvalidOperationException("Immagine non disponibile.");
+
+                    BeginInvokeOnMainThread(() =>
+                    {
+                        var editor = new ImageEditViewController(
+                            this,
+                            item,
+                            image,
+                            onSaved: null,
+                            initialQuarterTurns: initialQuarterTurns);
+
+                        NavigationController?.PushViewController(editor, true);
+                    });
+                }
+                finally
+                {
+                    TryDeletePath(tempPath);
+                }
             });
         }
 
@@ -5042,6 +5086,91 @@ namespace vault.iOS
             }
         }
 
+        private static int NormalizeQuarterTurns(int quarterTurns)
+        {
+            int normalized = quarterTurns % 4;
+            return normalized < 0 ? normalized + 4 : normalized;
+        }
+
+        private static UIImage RotateImageByQuarterTurns(UIImage source, int quarterTurns)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+
+            int normalizedTurns = NormalizeQuarterTurns(quarterTurns);
+            if (normalizedTurns == 0)
+            {
+                UIImage same = source.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+                return ReferenceEquals(same, source) ? source : same;
+            }
+
+            UIImage current = source;
+            bool ownsCurrent = false;
+
+            try
+            {
+                for (int i = 0; i < normalizedTurns; i++)
+                {
+                    UIImage rotated = RotateImageBy90(current, clockwise: true);
+                    if (ownsCurrent)
+                        current.Dispose();
+
+                    current = rotated;
+                    ownsCurrent = true;
+                }
+
+                return current;
+            }
+            catch
+            {
+                if (ownsCurrent)
+                    current.Dispose();
+                throw;
+            }
+        }
+
+        private static UIImage CreateEditorPreviewImage(UIImage source, int maxPixelSize)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+
+            UIImage normalized = NormalizeImageOrientation(source);
+            bool disposeNormalized = !ReferenceEquals(normalized, source);
+
+            try
+            {
+                nfloat srcWidth = normalized.Size.Width;
+                nfloat srcHeight = normalized.Size.Height;
+                if (srcWidth <= 0f || srcHeight <= 0f)
+                    throw new InvalidOperationException("Dimensioni immagine non valide.");
+
+                nfloat longestSide = srcWidth >= srcHeight ? srcWidth : srcHeight;
+                nfloat scale = longestSide > maxPixelSize
+                    ? (nfloat)(maxPixelSize / (double)longestSide)
+                    : 1f;
+                CGSize dstSize = new CGSize(
+                    (nfloat)Math.Max(1d, (double)(srcWidth * scale)),
+                    (nfloat)Math.Max(1d, (double)(srcHeight * scale)));
+
+                using var renderer = new UIGraphicsImageRenderer(dstSize);
+                UIImage rendered = renderer.CreateImage(_ =>
+                {
+                    normalized.Draw(new CGRect(0f, 0f, dstSize.Width, dstSize.Height));
+                });
+
+                UIImage result = rendered.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+                if (!ReferenceEquals(result, rendered))
+                    rendered.Dispose();
+
+                return result;
+            }
+            finally
+            {
+                if (disposeNormalized)
+                    normalized.Dispose();
+            }
+        }
+
         private static UIImage CropImage(UIImage source, CGRect cropRect)
         {
             if (source == null)
@@ -6842,6 +6971,8 @@ namespace vault.iOS
             private UIImage _workingImage;
             private bool _ownsWorkingImage;
             private bool _isDirty;
+            private UIImage? _previewImage;
+            private int _pendingQuarterTurns;
 
             private UIImageView? _imageView;
             private UIVisualEffectView? _toolbarBackground;
@@ -6856,12 +6987,15 @@ namespace vault.iOS
                 MainViewController owner,
                 VaultFileItem sourceItem,
                 UIImage workingImage,
-                Action<VaultFileItem, bool> onSaved)
+                Action<VaultFileItem, bool>? onSaved,
+                int initialQuarterTurns = 0)
             {
                 _owner = owner ?? throw new ArgumentNullException(nameof(owner));
                 _sourceItem = sourceItem ?? throw new ArgumentNullException(nameof(sourceItem));
                 _workingImage = workingImage ?? throw new ArgumentNullException(nameof(workingImage));
-                _onSaved = onSaved ?? throw new ArgumentNullException(nameof(onSaved));
+                _onSaved = onSaved ?? ((_, _) => { });
+                _pendingQuarterTurns = MainViewController.NormalizeQuarterTurns(initialQuarterTurns);
+                _isDirty = _pendingQuarterTurns != 0;
             }
 
             public override void ViewDidLoad()
@@ -6884,7 +7018,7 @@ namespace vault.iOS
                 {
                     ContentMode = UIViewContentMode.ScaleAspectFit,
                     BackgroundColor = UIColor.Black,
-                    Image = _workingImage
+                    Image = null
                 };
 
                 _toolbarBackground = new UIVisualEffectView(UIBlurEffect.FromStyle(UIBlurEffectStyle.SystemChromeMaterialDark))
@@ -6947,6 +7081,7 @@ namespace vault.iOS
                 View.AddSubview(_imageView);
                 View.AddSubview(_toolbarBackground);
                 View.AddSubview(_busyOverlay);
+                RebuildPreviewImageFromWorkingImage();
             }
 
             public override void ViewDidLayoutSubviews()
@@ -6979,8 +7114,12 @@ namespace vault.iOS
 
             protected override void Dispose(bool disposing)
             {
-                if (disposing && _ownsWorkingImage)
-                    _workingImage.Dispose();
+                if (disposing)
+                {
+                    DisposePreviewImage();
+                    if (_ownsWorkingImage)
+                        _workingImage.Dispose();
+                }
 
                 base.Dispose(disposing);
             }
@@ -7037,8 +7176,15 @@ namespace vault.iOS
                 ShowBusy(clockwise ? "Rotazione a destra..." : "Rotazione a sinistra...");
                 try
                 {
-                    UIImage rotated = await Task.Run(() => MainViewController.RotateImageBy90(_workingImage, clockwise));
-                    ReplaceWorkingImage(rotated, markDirty: true);
+                    UIImage previewSource = _previewImage ?? _workingImage;
+                    UIImage rotatedPreview = await Task.Run(() => MainViewController.RotateImageBy90(previewSource, clockwise));
+                    ReplacePreviewImage(rotatedPreview);
+                    _pendingQuarterTurns = MainViewController.NormalizeQuarterTurns(_pendingQuarterTurns + (clockwise ? 1 : -1));
+                    _isDirty = true;
+                }
+                catch (Exception ex)
+                {
+                    ShowError(ex.Message);
                 }
                 finally
                 {
@@ -7046,15 +7192,52 @@ namespace vault.iOS
                 }
             }
 
-            private void OpenCropEditor()
+            private async Task MaterializePendingRotationAsync()
             {
-                var cropController = new ImageCropViewController(_workingImage, cropped =>
-                {
-                    ReplaceWorkingImage(cropped, markDirty: true);
-                });
+                if (_pendingQuarterTurns == 0)
+                    return;
 
-                NavigationController?.PushViewController(cropController, true);
+                UIImage rotated = await Task.Run(() => MainViewController.RotateImageByQuarterTurns(_workingImage, _pendingQuarterTurns));
+                ReplaceWorkingImage(rotated, markDirty: false);
             }
+
+            private void RebuildPreviewImageFromWorkingImage()
+            {
+                int maxPixelSize = GetEditorPreviewMaxPixelSize();
+                UIImage preview = MainViewController.CreateEditorPreviewImage(_workingImage, maxPixelSize);
+                if (_pendingQuarterTurns != 0)
+                {
+                    UIImage rotatedPreview = MainViewController.RotateImageByQuarterTurns(preview, _pendingQuarterTurns);
+                    if (!ReferenceEquals(rotatedPreview, preview))
+                        preview.Dispose();
+                    preview = rotatedPreview;
+                }
+
+                ReplacePreviewImage(preview);
+            }
+
+            private void ReplacePreviewImage(UIImage image)
+            {
+                DisposePreviewImage();
+                _previewImage = image;
+                if (_imageView != null)
+                    _imageView.Image = image;
+            }
+
+            private void DisposePreviewImage()
+            {
+                _previewImage?.Dispose();
+                _previewImage = null;
+            }
+
+            private int GetEditorPreviewMaxPixelSize()
+            {
+                CGSize screenSize = UIScreen.MainScreen.Bounds.Size;
+                double longestSide = Math.Max((double)screenSize.Width, (double)screenSize.Height) * UIScreen.MainScreen.Scale * 1.5d;
+                return (int)Math.Max(1400d, Math.Min(2200d, longestSide));
+            }
+
+            private void OpenCropEditor() => _ = OpenCropEditorAsync();
 
             private void ReplaceWorkingImage(UIImage image, bool markDirty)
             {
@@ -7063,11 +7246,10 @@ namespace vault.iOS
 
                 _workingImage = image;
                 _ownsWorkingImage = true;
+                _pendingQuarterTurns = 0;
+                RebuildPreviewImageFromWorkingImage();
                 if (markDirty)
                     _isDirty = true;
-
-                if (_imageView != null)
-                    _imageView.Image = image;
             }
 
             private void PromptSaveOptions()
@@ -7102,6 +7284,7 @@ namespace vault.iOS
                 ShowBusy(overwrite ? "Salvataggio immagine..." : "Creazione copia modificata...", showProgress: true);
                 try
                 {
+                    await MaterializePendingRotationAsync();
                     var progress = new Progress<double>(value => UpdateBusyProgress(value));
                     VaultFileItem saved = await _owner.SaveEditedImageAsync(_sourceItem, _workingImage, overwrite, progress);
                     _onSaved(saved, overwrite);
@@ -7115,6 +7298,31 @@ namespace vault.iOS
                 {
                     HideBusy();
                 }
+            }
+
+            private async Task OpenCropEditorAsync()
+            {
+                ShowBusy("Preparazione ritaglio...");
+                try
+                {
+                    await MaterializePendingRotationAsync();
+                }
+                catch (Exception ex)
+                {
+                    ShowError(ex.Message);
+                    return;
+                }
+                finally
+                {
+                    HideBusy();
+                }
+
+                var cropController = new ImageCropViewController(_workingImage, cropped =>
+                {
+                    ReplaceWorkingImage(cropped, markDirty: true);
+                });
+
+                NavigationController?.PushViewController(cropController, true);
             }
 
             private void ShowBusy(string title, bool showProgress = false)
