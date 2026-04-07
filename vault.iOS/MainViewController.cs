@@ -6294,7 +6294,7 @@ namespace vault.iOS
                     return;
                 }
 
-                nfloat targetZoom = NMath.Min(_scrollView.MaximumZoomScale, minZoom * 2.5f);
+                nfloat targetZoom = (nfloat)Math.Min((double)_scrollView.MaximumZoomScale, (double)(minZoom * 2.5f));
                 CGPoint tapPoint = gesture.LocationInView(_imageView);
                 CGSize boundsSize = _scrollView.Bounds.Size;
                 nfloat zoomWidth = boundsSize.Width / targetZoom;
@@ -6345,8 +6345,8 @@ namespace vault.iOS
 
                 CGSize boundsSize = _scrollView.Bounds.Size;
                 CGRect imageFrame = _imageView.Frame;
-                nfloat horizontalInset = NMath.Max(0f, (boundsSize.Width - imageFrame.Width) / 2f);
-                nfloat verticalInset = NMath.Max(0f, (boundsSize.Height - imageFrame.Height) / 2f);
+                nfloat horizontalInset = (nfloat)Math.Max(0d, (double)((boundsSize.Width - imageFrame.Width) / 2f));
+                nfloat verticalInset = (nfloat)Math.Max(0d, (double)((boundsSize.Height - imageFrame.Height) / 2f));
                 _scrollView.ContentInset = new UIEdgeInsets(verticalInset, horizontalInset, verticalInset, horizontalInset);
             }
 
@@ -6371,14 +6371,16 @@ namespace vault.iOS
                 if (imageSize.Width <= 0f || imageSize.Height <= 0f || boundsSize.Width <= 0f || boundsSize.Height <= 0f)
                     return boundsSize;
 
-                nfloat scale = NMath.Min(boundsSize.Width / imageSize.Width, boundsSize.Height / imageSize.Height);
+                nfloat scale = (nfloat)Math.Min(
+                    (double)(boundsSize.Width / imageSize.Width),
+                    (double)(boundsSize.Height / imageSize.Height));
                 double scaleValue = scale;
                 if (scale <= 0f || double.IsNaN(scaleValue) || double.IsInfinity(scaleValue))
                     return boundsSize;
 
                 return new CGSize(
-                    NMath.Max(1f, imageSize.Width * scale),
-                    NMath.Max(1f, imageSize.Height * scale));
+                    (nfloat)Math.Max(1d, (double)(imageSize.Width * scale)),
+                    (nfloat)Math.Max(1d, (double)(imageSize.Height * scale)));
             }
 
             private sealed class ImageZoomScrollDelegate : UIScrollViewDelegate
@@ -6390,9 +6392,9 @@ namespace vault.iOS
                     _owner = owner;
                 }
 
-                public override UIView? ViewForZoomingInScrollView(UIScrollView scrollView)
+                public override UIView ViewForZoomingInScrollView(UIScrollView scrollView)
                 {
-                    return _owner._imageView;
+                    return _owner._imageView!;
                 }
 
                 public override void DidZoom(UIScrollView scrollView)
