@@ -1,0 +1,134 @@
+name: Build iOS Fast Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/build-ios-fast.yml"
+      - ".github/workflows/build-ios-ipa.yml"
+      - "global.json"
+      - "vault.iOS/**"
+      - "vault.iOS.Shared/**"
+      - "vault.iOS.ShareExtension/**"
+      - "vault.Core/**"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ios-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-fast:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Install iOS workload
+        run: dotnet workload install ios --skip-manifest-update
+
+      - name: Restore iOS app projects
+        run: |
+          dotnet restore vault.iOS.Shared/vault.iOS.Shared.csproj
+          dotnet restore vault.iOS/vault.iOS.csproj
+          dotnet restore vault.iOS.ShareExtension/vault.iOS.ShareExtension.csproj
+
+      - name: Build iOS app and share extension
+        id: build
+        continue-on-error: true
+        run: |
+          dotnet build vault.iOS/vault.iOS.csproj \
+            -f net8.0-ios16.4 \
+            -c Release \
+            -r ios-arm64 \
+            --no-restore \
+            -p:BuildIpa=false \
+            -p:EnableCodeSigning=false \
+            -p:CheckEolWorkloads=false \
+            -p:CheckEolTargetFramework=false \
+            -fl \
+            "-flp:logfile=build-ios-fast.log;verbosity=normal" \
+            -bl:build-ios-fast.binlog
+
+      - name: Upload fast build binlog
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ios-fast-build-binlog
+          path: build-ios-fast.binlog
+          if-no-files-found: ignore
+
+      - name: Upload fast build text log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ios-fast-build-log
+          path: build-ios-fast.log
+          if-no-files-found: ignore
+
+      - name: Summarize fast build errors
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f build-ios-fast.log ]; then
+            echo "build-ios-fast.log non trovato."
+            exit 0
+          fi
+
+          echo "Esito step build: ${{ steps.build.outcome }}"
+          echo "Prime righe contenenti error/warning:"
+          grep -Ein "error|warning" build-ios-fast.log | tail -n 200 || true
+
+      - name: Inspect app bundle for extensions
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH=$(find vault.iOS/bin/Release -type d -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "App bundle non trovato nel build output."
+            find vault.iOS/bin/Release -maxdepth 6 -type d | sed 's/^/ - /'
+            exit 1
+          fi
+
+          echo "App bundle trovato: $APP_PATH"
+          if [ ! -d "$APP_PATH/PlugIns" ]; then
+            echo "La cartella PlugIns non esiste nell'app bundle."
+            find "$APP_PATH" -maxdepth 3 -type d | sed 's/^/ - /'
+            exit 1
+          fi
+
+          echo "Contenuto PlugIns:"
+          find "$APP_PATH/PlugIns" -maxdepth 2 | sed 's/^/ - /'
+
+          APPEX_PATH=$(find "$APP_PATH/PlugIns" -type d -name "*.appex" | head -n 1)
+          if [ -z "$APPEX_PATH" ]; then
+            echo "Nessuna estensione .appex trovata nel bundle."
+            exit 1
+          fi
+
+          echo "Estensione rilevata: $APPEX_PATH"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$APPEX_PATH/Info.plist" || true
+
+      - name: Fail if fast build did not succeed
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            echo "Il build iOS rapido non e riuscito. Controlla lo step 'Summarize fast build errors' e gli artifact di log."
+            exit 1
+          fi

@@ -2,15 +2,6 @@ name: Build iOS IPA
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
-    paths:
-      - ".github/workflows/build-ios-ipa.yml"
-      - "global.json"
-      - "vault.iOS/**"
-      - "vault.iOS.Shared/**"
-      - "vault.iOS.ShareExtension/**"
-      - "vault.Core/**"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -57,6 +48,7 @@ jobs:
             -f net8.0-ios16.4 \
             -c Release \
             -r ios-arm64 \
+            --no-restore \
             -p:BuildIpa=true \
             -p:EnableCodeSigning=false \
             -p:CheckEolWorkloads=false \
