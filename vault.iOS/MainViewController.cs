@@ -6982,6 +6982,7 @@ namespace vault.iOS
             private UILabel? _busyLabel;
             private UIProgressView? _busyProgressView;
             private UILabel? _busyPercentLabel;
+            private CancellationTokenSource? _busyPseudoProgressCts;
 
             public ImageEditViewController(
                 MainViewController owner,
@@ -7173,7 +7174,7 @@ namespace vault.iOS
 
             private async Task RotateWorkingImageAsync(bool clockwise)
             {
-                ShowBusy(clockwise ? "Rotazione a destra..." : "Rotazione a sinistra...");
+                ShowBusy(clockwise ? "Rotazione a destra..." : "Rotazione a sinistra...", showProgress: true);
                 try
                 {
                     UIImage previewSource = _previewImage ?? _workingImage;
@@ -7302,7 +7303,7 @@ namespace vault.iOS
 
             private async Task OpenCropEditorAsync()
             {
-                ShowBusy("Preparazione ritaglio...");
+                ShowBusy("Preparazione ritaglio...", showProgress: true);
                 try
                 {
                     await MaterializePendingRotationAsync();
@@ -7330,6 +7331,11 @@ namespace vault.iOS
                 if (_busyOverlay == null)
                     return;
 
+                if (showProgress)
+                    StartBusyPseudoProgress();
+                else
+                    StopBusyPseudoProgress();
+
                 _busyLabel!.Text = title;
                 _busyProgressView!.Progress = 0f;
                 _busyPercentLabel!.Text = "0%";
@@ -7352,11 +7358,72 @@ namespace vault.iOS
                 });
             }
 
+            private void StartBusyPseudoProgress()
+            {
+                StopBusyPseudoProgress();
+
+                var cts = new CancellationTokenSource();
+                _busyPseudoProgressCts = cts;
+                UpdateBusyProgress(0d);
+
+                _ = Task.Run(async () =>
+                {
+                    double current = 0d;
+                    try
+                    {
+                        while (!cts.Token.IsCancellationRequested)
+                        {
+                            await Task.Delay(140, cts.Token);
+                            current = GetNextPseudoProgress(current);
+                            UpdateBusyProgress(current);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                });
+            }
+
+            private void StopBusyPseudoProgress()
+            {
+                CancellationTokenSource? cts = Interlocked.Exchange(ref _busyPseudoProgressCts, null);
+                if (cts == null)
+                    return;
+
+                try
+                {
+                    cts.Cancel();
+                }
+                catch
+                {
+                }
+
+                cts.Dispose();
+            }
+
+            private static double GetNextPseudoProgress(double currentPercent)
+            {
+                double clamped = Math.Max(0d, Math.Min(0.96d, currentPercent));
+                if (clamped < 0.24d)
+                    return clamped + 0.08d;
+                if (clamped < 0.52d)
+                    return clamped + 0.05d;
+                if (clamped < 0.74d)
+                    return clamped + 0.03d;
+                if (clamped < 0.88d)
+                    return clamped + 0.014d;
+                if (clamped < 0.95d)
+                    return clamped + 0.006d;
+
+                return 0.96d;
+            }
+
             private void HideBusy()
             {
                 if (_busyOverlay == null)
                     return;
 
+                StopBusyPseudoProgress();
                 _busyIndicator!.StopAnimating();
                 _busyOverlay.Hidden = true;
             }
