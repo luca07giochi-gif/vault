@@ -91,6 +91,7 @@ namespace vault.iOS
         private UILabel? _emptyLabel;
         private UIButton? _openVaultCenteredButton;
         private UIButton? _createVaultCenteredButton;
+        private UILabel? _homeVersionLabel;
         private UITabBar? _bottomTabBar;
         private UITabBarItem? _vaultTabItem;
         private UITabBarItem? _addTabItem;
@@ -291,6 +292,17 @@ namespace vault.iOS
             _createVaultCenteredButton.TouchUpInside += (_, _) => PromptCreateVaultSettingsMenu();
             View.AddSubview(_createVaultCenteredButton);
 
+            _homeVersionLabel = new UILabel
+            {
+                TextAlignment = UITextAlignment.Center,
+                Lines = 1,
+                Font = UIFont.SystemFontOfSize(12f),
+                TextColor = UIColor.FromRGB(120, 120, 120),
+                Text = GetHomeVersionText(),
+                Hidden = false
+            };
+            View.AddSubview(_homeVersionLabel);
+
             SetupBottomMenu();
             BuildBusyOverlay();
             ConfigureNavigationItems();
@@ -380,6 +392,17 @@ namespace vault.iOS
                         buttonWidth,
                         buttonHeight);
                 }
+            }
+
+            if (_homeVersionLabel != null)
+            {
+                nfloat labelWidth = view.Bounds.Width - 40f;
+                if (labelWidth < 120f)
+                    labelWidth = view.Bounds.Width;
+                nfloat labelHeight = 18f;
+                nfloat bottomPadding = 8f;
+                nfloat y = view.Bounds.Height - view.SafeAreaInsets.Bottom - labelHeight - bottomPadding;
+                _homeVersionLabel.Frame = new CGRect((view.Bounds.Width - labelWidth) / 2f, y, labelWidth, labelHeight);
             }
 
             UpdatePreviewLayout();
@@ -651,6 +674,8 @@ namespace vault.iOS
                 _openVaultCenteredButton.Hidden = hasVault;
             if (_createVaultCenteredButton != null)
                 _createVaultCenteredButton.Hidden = hasVault;
+            if (_homeVersionLabel != null)
+                _homeVersionLabel.Hidden = hasVault;
 
             if (!hasVault)
             {
@@ -795,6 +820,25 @@ namespace vault.iOS
                 return;
 
             _ = PromptCloseVaultAsync();
+        }
+
+        private static string GetHomeVersionText()
+        {
+            try
+            {
+                NSDictionary? info = NSBundle.MainBundle.InfoDictionary;
+                string? version = info?["CFBundleShortVersionString"]?.ToString();
+                string? build = info?["CFBundleVersion"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(version) && !string.IsNullOrWhiteSpace(build))
+                    return $"Versione {version} ({build})";
+                if (!string.IsNullOrWhiteSpace(version))
+                    return $"Versione {version}";
+            }
+            catch
+            {
+            }
+
+            return "Versione app";
         }
 
         private async Task PromptCloseVaultAsync()
