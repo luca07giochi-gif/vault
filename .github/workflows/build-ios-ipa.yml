@@ -2,6 +2,15 @@ name: Build iOS IPA
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/build-ios-ipa.yml"
+      - "global.json"
+      - "vault.iOS/**"
+      - "vault.iOS.Shared/**"
+      - "vault.iOS.ShareExtension/**"
+      - "vault.Core/**"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
