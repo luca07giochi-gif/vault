@@ -1735,7 +1735,7 @@ namespace vault.iOS
             string currentVaultId = _session.VaultId;
             string currentVaultPath = _vaultUrl.Path ?? string.Empty;
 
-            return ShareVaultRegistryBridge.LoadAppManagedVaults()
+            return ShareVaultRegistryBridge.LoadPublishedVaultsMergedWithLocalVaults()
                 .FirstOrDefault(vault =>
                     string.Equals(vault.VaultId, currentVaultId, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(vault.LastKnownPath, currentVaultPath, StringComparison.OrdinalIgnoreCase));
