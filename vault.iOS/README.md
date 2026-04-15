@@ -33,6 +33,9 @@ dotnet publish vault.iOS/vault.iOS.csproj -f net8.0-ios16.4 -c Release -r ios-ar
 Workflow: `.github/workflows/build-ios-ipa.yml`
 
 Genera artifact `vault-ios-ipa` contenente il file `.ipa`.
+Il workflow mantiene `ApplicationDisplayVersion` dal progetto iOS e incrementa automaticamente
+`ApplicationVersion` usando `github.run_number`, quindi nella home dell'app compare un build number
+diverso a ogni IPA generata.
 
 Nota CI: il workflow usa runner `macos-14`, SDK `.NET 8.0.100` e `--skip-manifest-update`
 per restare compatibile con la versione Xcode del runner GitHub.

@@ -40,6 +40,22 @@ jobs:
           dotnet --version
           dotnet --list-sdks
 
+      - name: Compute iOS version metadata
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          MARKETING_VERSION=$(sed -n 's:.*<ApplicationDisplayVersion>\([^<]*\)</ApplicationDisplayVersion>.*:\1:p' vault.iOS/vault.iOS.csproj | head -n 1)
+          if [ -z "${MARKETING_VERSION:-}" ]; then
+            echo "Impossibile leggere ApplicationDisplayVersion da vault.iOS.csproj"
+            exit 1
+          fi
+
+          BUILD_NUMBER="${{ github.run_number }}"
+          echo "marketing_version=$MARKETING_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build_number=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Versione iOS: $MARKETING_VERSION ($BUILD_NUMBER)"
+
       - name: Install iOS workload
         run: dotnet workload install ios --skip-manifest-update
 
@@ -59,6 +75,8 @@ jobs:
             -r ios-arm64 \
             --no-restore \
             -p:BuildIpa=true \
+            -p:ApplicationDisplayVersion=${{ steps.version.outputs.marketing_version }} \
+            -p:ApplicationVersion=${{ steps.version.outputs.build_number }} \
             -p:EnableCodeSigning=false \
             -p:CheckEolWorkloads=false \
             -p:CheckEolTargetFramework=false \
@@ -156,7 +174,11 @@ jobs:
           fi
 
           echo "Estensione rilevata: $APPEX_PATH"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PATH/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APPEX_PATH/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$APPEX_PATH/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$APPEX_PATH/Info.plist" || true
 
@@ -193,7 +215,11 @@ jobs:
           fi
 
           echo "Estensione IPA rilevata: $APPEX_PATH"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP_PATH/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APPEX_PATH/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APPEX_PATH/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$APPEX_PATH/Info.plist" || true
           /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPrincipalClass" "$APPEX_PATH/Info.plist" || true
           rm -rf "$TMP_DIR"
