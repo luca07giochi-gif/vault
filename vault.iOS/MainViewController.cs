@@ -122,6 +122,7 @@ namespace vault.iOS
         private string? _sharedQueueRootPath;
         private string? _currentVaultRecentId;
         private bool _pendingImportPromptVisible;
+        private CancellationTokenSource? _pendingImportPromptCts;
         private bool _manualSaveModeEnabled;
 
         private bool HasPendingVaultSaveChanges =>
@@ -308,6 +309,14 @@ namespace vault.iOS
             ConfigureNavigationItems();
             ShareVaultRegistryBridge.RepublishAppManagedVaults();
             UpdateUiState();
+        }
+
+        public override void ViewDidAppear(bool animated)
+        {
+            base.ViewDidAppear(animated);
+
+            if (_session != null)
+                SchedulePendingImportsPrompt(TimeSpan.FromMilliseconds(200));
         }
 
         public override void ViewDidLayoutSubviews()
@@ -874,6 +883,7 @@ namespace vault.iOS
 
         private void CloseCurrentVaultSession(bool reloadUi)
         {
+            CancelPendingImportPrompt();
             _session?.Dispose();
             _session = null;
             _vaultUrl = null;
@@ -893,6 +903,110 @@ namespace vault.iOS
 
             if (reloadUi)
                 ReloadFolderItems();
+        }
+
+        private void CancelPendingImportPrompt()
+        {
+            try
+            {
+                _pendingImportPromptCts?.Cancel();
+            }
+            catch
+            {
+                // Best effort cancellation.
+            }
+            finally
+            {
+                _pendingImportPromptCts?.Dispose();
+                _pendingImportPromptCts = null;
+            }
+        }
+
+        private void SchedulePendingImportsPrompt(TimeSpan? initialDelay = null)
+        {
+            if (_session == null)
+                return;
+
+            CancelPendingImportPrompt();
+
+            var cts = new CancellationTokenSource();
+            _pendingImportPromptCts = cts;
+            TimeSpan delay = initialDelay ?? TimeSpan.FromMilliseconds(350);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (delay > TimeSpan.Zero)
+                        await Task.Delay(delay, cts.Token);
+
+                    for (int attempt = 0; attempt < 8; attempt++)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(150), cts.Token);
+
+                        bool canPresent = false;
+                        await RunOnMainThreadAsync(() =>
+                        {
+                            canPresent =
+                                _session != null &&
+                                ViewIfLoaded?.Window != null &&
+                                PresentedViewController == null &&
+                                !IsBeingDismissed;
+                        });
+
+                        if (!canPresent)
+                            continue;
+
+                        await RunOnMainThreadAsync(() =>
+                        {
+                            if (!cts.IsCancellationRequested)
+                                PromptPendingImportsForCurrentVaultIfNeeded();
+                        });
+                        return;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Prompt rescheduled or no longer relevant.
+                }
+                finally
+                {
+                    await RunOnMainThreadAsync(() =>
+                    {
+                        if (ReferenceEquals(_pendingImportPromptCts, cts))
+                        {
+                            _pendingImportPromptCts.Dispose();
+                            _pendingImportPromptCts = null;
+                        }
+                        else
+                        {
+                            cts.Dispose();
+                        }
+                    });
+                }
+            });
+        }
+
+        private Task RunOnMainThreadAsync(Action action)
+        {
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            BeginInvokeOnMainThread(() =>
+            {
+                try
+                {
+                    action();
+                    tcs.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            });
+
+            return tcs.Task;
         }
 
         private void ClearThumbnailCache()
@@ -2925,7 +3039,7 @@ namespace vault.iOS
 
             RegisterCurrentVaultAsRecent();
             await PromptUnsavedDraftForCurrentVaultIfNeededAsync();
-            PromptPendingImportsForCurrentVaultIfNeeded();
+            SchedulePendingImportsPrompt();
         }
 
         private async Task AddPickedFilesAsync(NSUrl[] urls)
