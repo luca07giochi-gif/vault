@@ -9,13 +9,19 @@ namespace vault.UI
     public partial class VaultSettingsWindow : Window
     {
         public VaultStorageFormat CurrentStorageFormat { get; }
+        public VaultProtectionMode CurrentProtectionMode { get; }
 
-        public VaultSettingsWindow(VaultStorageFormat currentStorageFormat)
+        public VaultSettingsWindow(
+            VaultStorageFormat currentStorageFormat,
+            VaultProtectionMode currentProtectionMode)
         {
             InitializeComponent();
             CurrentStorageFormat = currentStorageFormat;
+            CurrentProtectionMode = currentProtectionMode;
 
             ApplyLocalization();
+            ProtectWithPasswordCheckBox.IsChecked = currentProtectionMode == VaultProtectionMode.Password;
+            UpdatePasswordInputsState();
             CurrentFormatTextBlock.Text = UiText.Format("settings.label.currentFormat", FormatToLabel(CurrentStorageFormat));
             StorageFormatComboBox.SelectedIndex = CurrentStorageFormat switch
             {
@@ -28,9 +34,20 @@ namespace vault.UI
 
         public string NewPassword => NewPasswordBox.Password;
 
+        public bool ProtectWithPassword => ProtectWithPasswordCheckBox.IsChecked != false;
+
         public bool ShouldChangePassword =>
-            !string.IsNullOrWhiteSpace(NewPasswordBox.Password) ||
-            !string.IsNullOrWhiteSpace(ConfirmPasswordBox.Password);
+            ProtectWithPassword &&
+            (!string.IsNullOrWhiteSpace(NewPasswordBox.Password) ||
+             !string.IsNullOrWhiteSpace(ConfirmPasswordBox.Password));
+
+        public bool ShouldEnablePasswordProtection =>
+            CurrentProtectionMode == VaultProtectionMode.Fast &&
+            ProtectWithPassword;
+
+        public bool ShouldDisablePasswordProtection =>
+            CurrentProtectionMode == VaultProtectionMode.Password &&
+            !ProtectWithPassword;
 
         public VaultStorageFormat SelectedStorageFormat =>
             GetSelectedStorageFormat();
@@ -47,19 +64,22 @@ namespace vault.UI
         private void Save_Click(object sender, RoutedEventArgs e)
         {
             bool wantsPasswordChange = ShouldChangePassword;
+            bool wantsProtectionChange = ShouldEnablePasswordProtection || ShouldDisablePasswordProtection;
             bool wantsFormatChange = ShouldChangeStorageFormat;
 
-            if (!wantsPasswordChange && !wantsFormatChange)
+            if (!wantsPasswordChange && !wantsProtectionChange && !wantsFormatChange)
             {
                 MessageBox.Show(UiText.Get("settings.msg.noChange"));
                 return;
             }
 
-            if (wantsPasswordChange)
+            if (ProtectWithPassword && (ShouldEnablePasswordProtection || wantsPasswordChange))
             {
                 if (string.IsNullOrWhiteSpace(NewPasswordBox.Password))
                 {
-                    MessageBox.Show(UiText.Get("settings.msg.enterNewPassword"));
+                    MessageBox.Show(UiText.Get(ShouldEnablePasswordProtection
+                        ? "settings.msg.enterPasswordToProtect"
+                        : "settings.msg.enterNewPassword"));
                     return;
                 }
 
@@ -106,10 +126,32 @@ namespace vault.UI
                 _ => UiText.Get("format.short.extended")
             };
 
+        private void ProtectWithPasswordCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            UpdatePasswordInputsState();
+        }
+
+        private void UpdatePasswordInputsState()
+        {
+            bool passwordProtected = ProtectWithPassword;
+            NewPasswordLabelTextBlock.IsEnabled = passwordProtected;
+            ConfirmPasswordLabelTextBlock.IsEnabled = passwordProtected;
+            NewPasswordBox.IsEnabled = passwordProtected;
+            ConfirmPasswordBox.IsEnabled = passwordProtected;
+
+            if (!passwordProtected)
+            {
+                NewPasswordBox.Password = string.Empty;
+                ConfirmPasswordBox.Password = string.Empty;
+            }
+        }
+
         private void ApplyLocalization()
         {
             Title = UiText.Get("settings.windowTitle");
             HeaderTextBlock.Text = UiText.Get("settings.header");
+            ProtectWithPasswordCheckBox.Content = UiText.Get("settings.label.protectWithPassword");
+            ProtectionNoteTextBlock.Text = UiText.Get("settings.note.fastMode");
             PasswordHeaderTextBlock.Text = UiText.Get("settings.passwordHeader");
             NewPasswordLabelTextBlock.Text = UiText.Get("settings.label.newPassword");
             ConfirmPasswordLabelTextBlock.Text = UiText.Get("settings.label.confirmPassword");

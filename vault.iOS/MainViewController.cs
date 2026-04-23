@@ -14,6 +14,7 @@ using Photos;
 using PhotosUI;
 using SharpCompress.Archives;
 using UIKit;
+using vault.Core;
 using vault.Core.Domain;
 using vault.iOS.Shared;
 
@@ -124,6 +125,7 @@ namespace vault.iOS
         private bool _pendingImportPromptVisible;
         private CancellationTokenSource? _pendingImportPromptCts;
         private bool _manualSaveModeEnabled;
+        private NSUrl? _pendingIncomingVaultUrl;
 
         private bool HasPendingVaultSaveChanges =>
             _session != null && (_session.IsDirty || _session.NeedsVaultIdUpgrade);
@@ -315,8 +317,32 @@ namespace vault.iOS
         {
             base.ViewDidAppear(animated);
 
+            if (_pendingIncomingVaultUrl != null)
+            {
+                NSUrl pendingUrl = _pendingIncomingVaultUrl;
+                _pendingIncomingVaultUrl = null;
+                PromptPasswordAndOpenVault(pendingUrl);
+                return;
+            }
+
             if (_session != null)
                 SchedulePendingImportsPrompt(TimeSpan.FromMilliseconds(200));
+        }
+
+        public bool HandleIncomingVaultUrl(NSUrl vaultUrl)
+        {
+            if (vaultUrl == null)
+                return false;
+
+            BeginInvokeOnMainThread(() =>
+            {
+                if (IsViewLoaded)
+                    PromptPasswordAndOpenVault(vaultUrl);
+                else
+                    _pendingIncomingVaultUrl = vaultUrl;
+            });
+
+            return true;
         }
 
         public override void ViewDidLayoutSubviews()
@@ -1199,7 +1225,13 @@ namespace vault.iOS
                     $"Formato vault: {GetStorageFormatLabel(_session.StorageFormat)}",
                     UIAlertActionStyle.Default,
                     __ => OpenStorageFormatMenu()));
-                sheet.AddAction(UIAlertAction.Create("Cambia password", UIAlertActionStyle.Default, __ => PromptChangePassword()));
+                string protectionLabel = _session.RequiresPassword
+                    ? "Protezione: attiva"
+                    : "Protezione: veloce";
+                sheet.AddAction(UIAlertAction.Create(
+                    protectionLabel,
+                    UIAlertActionStyle.Default,
+                    __ => PromptProtectionSettings()));
 
                 if (_manualSaveModeEnabled)
                 {
@@ -1596,6 +1628,39 @@ namespace vault.iOS
             };
         }
 
+        private static UISwitch AddProtectionSwitchToAlert(
+            UIAlertController alert,
+            bool initialValue,
+            string labelText)
+        {
+            const nfloat top = 72f;
+            const nfloat left = 18f;
+            const nfloat right = 18f;
+
+            var label = new UILabel(new CGRect(left, top, 180f, 24f))
+            {
+                Text = labelText,
+                Font = UIFont.SystemFontOfSize(14f),
+                TextColor = UIColor.LabelColor,
+                Lines = 1
+            };
+
+            var toggle = new UISwitch();
+            toggle.On = initialValue;
+            nfloat toggleX = alert.View.Bounds.Width > 0
+                ? alert.View.Bounds.Width - toggle.Frame.Width - right
+                : 208f;
+            toggle.Frame = new CGRect(
+                toggleX,
+                top - 3f,
+                toggle.Frame.Width,
+                toggle.Frame.Height);
+
+            alert.View.AddSubview(label);
+            alert.View.AddSubview(toggle);
+            return toggle;
+        }
+
         private void OpenStorageFormatMenu()
         {
             if (_session == null)
@@ -1645,11 +1710,6 @@ namespace vault.iOS
                 ShowError("Non riesco a trovare il vault selezionato.");
                 return;
             }
-            if (string.IsNullOrWhiteSpace(_sessionPassword))
-            {
-                ShowError("Password sessione non disponibile. Riapri il vault.");
-                return;
-            }
 
             await RunBusyWithProgressAsync($"Cambio formato in {GetStorageFormatLabel(newFormat)}...", async progress =>
             {
@@ -1674,20 +1734,20 @@ namespace vault.iOS
             });
         }
 
-        private void PromptChangePassword()
+        private void PromptProtectionSettings()
         {
             if (_session == null)
                 return;
-            if (string.IsNullOrWhiteSpace(_sessionPassword))
-            {
-                ShowError("Password sessione non disponibile. Riapri il vault.");
-                return;
-            }
 
             UIAlertController alert = UIAlertController.Create(
-                "Cambia password",
-                "Inserisci la nuova password",
+                "Protezione e password",
+                "Gestisci la protezione del vault.\n\n\n",
                 UIAlertControllerStyle.Alert);
+
+            UISwitch protectionSwitch = AddProtectionSwitchToAlert(
+                alert,
+                initialValue: _session.RequiresPassword,
+                labelText: "Proteggi con password");
 
             alert.AddTextField(field =>
             {
@@ -1703,12 +1763,31 @@ namespace vault.iOS
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             alert.AddAction(UIAlertAction.Create("Conferma", UIAlertActionStyle.Default, __ =>
             {
+                bool passwordProtected = protectionSwitch.On;
                 string newPassword = alert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
                 string confirmPassword = alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
 
+                if (!passwordProtected)
+                {
+                    if (!_session.RequiresPassword)
+                    {
+                        ShowSimpleAlert("Nessuna modifica", "Questo vault e gia in modalita veloce.");
+                        return;
+                    }
+
+                    _ = DisablePasswordProtectionAsync();
+                    return;
+                }
+
                 if (string.IsNullOrWhiteSpace(newPassword))
                 {
-                    ShowError("Inserisci una nuova password valida.");
+                    if (_session.RequiresPassword)
+                    {
+                        ShowSimpleAlert("Nessuna modifica", "La protezione con password e gia attiva.");
+                        return;
+                    }
+
+                    ShowError("Inserisci una password valida.");
                     return;
                 }
 
@@ -1733,11 +1812,6 @@ namespace vault.iOS
                 ShowError("Non riesco a trovare il vault selezionato.");
                 return;
             }
-            if (string.IsNullOrWhiteSpace(_sessionPassword))
-            {
-                ShowError("Password sessione non disponibile. Riapri il vault.");
-                return;
-            }
 
             await RunBusyWithProgressAsync("Aggiornamento password...", async progress =>
             {
@@ -1759,6 +1833,44 @@ namespace vault.iOS
                 }
 
                 _sessionPassword = newPassword;
+            });
+        }
+
+        private async Task DisablePasswordProtectionAsync()
+        {
+            if (_session == null)
+                return;
+            if (_vaultUrl == null)
+            {
+                ShowError("Non riesco a trovare il vault selezionato.");
+                return;
+            }
+            if (!_session.RequiresPassword)
+            {
+                ShowSimpleAlert("Nessuna modifica", "Questo vault e gia in modalita veloce.");
+                return;
+            }
+
+            await RunBusyWithProgressAsync("Attivazione modalita veloce...", async progress =>
+            {
+                if (_session == null)
+                    return;
+
+                string rollbackPassword = _sessionPassword;
+                string rollbackFolder = _currentFolder;
+
+                _session.DisablePasswordProtection();
+                try
+                {
+                    await PersistVaultAsync(progress, force: true);
+                }
+                catch
+                {
+                    await RestoreSessionFromDiskAsync(rollbackPassword, rollbackFolder);
+                    throw;
+                }
+
+                _sessionPassword = string.Empty;
             });
         }
 
@@ -2538,11 +2650,6 @@ namespace vault.iOS
                 ShowError("Non riesco a trovare il vault selezionato.");
                 return false;
             }
-            if (string.IsNullOrWhiteSpace(_sessionPassword))
-            {
-                ShowError("Password sessione non disponibile. Riapri il vault.");
-                return false;
-            }
 
             string rollbackPassword = _sessionPassword;
             string rollbackFolder = _currentFolder;
@@ -2596,8 +2703,13 @@ namespace vault.iOS
         {
             UIAlertController alert = UIAlertController.Create(
                 "Crea vault",
-                $"Formato: {GetStorageFormatLabel(format)}",
+                $"Formato: {GetStorageFormatLabel(format)}\n\n\n",
                 UIAlertControllerStyle.Alert);
+
+            UISwitch protectionSwitch = AddProtectionSwitchToAlert(
+                alert,
+                initialValue: true,
+                labelText: "Proteggi con password");
 
             alert.AddTextField(field =>
             {
@@ -2632,26 +2744,35 @@ namespace vault.iOS
                 string requestedName = alert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
                 string password = alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
                 string confirm = alert.TextFields?.ElementAtOrDefault(2)?.Text ?? string.Empty;
+                bool passwordProtected = protectionSwitch.On;
 
-                if (string.IsNullOrWhiteSpace(password))
+                if (passwordProtected && string.IsNullOrWhiteSpace(password))
                 {
                     ShowError("Inserisci una password valida.");
                     return;
                 }
 
-                if (!string.Equals(password, confirm, StringComparison.Ordinal))
+                if (passwordProtected && !string.Equals(password, confirm, StringComparison.Ordinal))
                 {
                     ShowError("Le password non coincidono.");
                     return;
                 }
 
-                _ = CreateVaultFromIosAsync(requestedName, password, format);
+                _ = CreateVaultFromIosAsync(
+                    requestedName,
+                    passwordProtected ? password : string.Empty,
+                    format,
+                    passwordProtected);
             }));
 
             PresentViewController(alert, true, null);
         }
 
-        private async Task CreateVaultFromIosAsync(string requestedName, string password, VaultStorageFormat format)
+        private async Task CreateVaultFromIosAsync(
+            string requestedName,
+            string password,
+            VaultStorageFormat format,
+            bool passwordProtected)
         {
             string tempVaultPath = BuildCreateVaultTempPath(requestedName);
             await RunBusyWithProgressAsync("Creazione vault...", async progress =>
@@ -2659,7 +2780,7 @@ namespace vault.iOS
                 await Task.Run(() =>
                 {
                     var manager = new VaultManager();
-                    manager.CreateVault(tempVaultPath, password, format, progress);
+                    manager.CreateVault(tempVaultPath, password, format, passwordProtected, progress);
                 });
             });
 
@@ -2960,6 +3081,23 @@ namespace vault.iOS
 
         private void PromptPasswordAndOpenVault(NSUrl vaultUrl)
         {
+            VaultFileFormat.Header header;
+            try
+            {
+                header = ReadVaultHeader(vaultUrl);
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex.Message);
+                return;
+            }
+
+            if (!header.RequiresPassword)
+            {
+                _ = OpenVaultAsync(vaultUrl, string.Empty, header);
+                return;
+            }
+
             UIAlertController prompt = UIAlertController.Create(
                 "Apri vault",
                 vaultUrl.LastPathComponent ?? "File vault",
@@ -2985,9 +3123,20 @@ namespace vault.iOS
             PresentViewController(prompt, true, null);
         }
 
-        private async Task OpenVaultAsync(NSUrl vaultUrl, string password)
+        private async Task OpenVaultAsync(NSUrl vaultUrl, string password, VaultFileFormat.Header? knownHeader = null)
         {
-            if (string.IsNullOrWhiteSpace(password))
+            VaultFileFormat.Header header;
+            try
+            {
+                header = knownHeader ?? await Task.Run(() => ReadVaultHeader(vaultUrl));
+            }
+            catch (Exception ex)
+            {
+                ShowError(ex.Message);
+                return;
+            }
+
+            if (header.RequiresPassword && string.IsNullOrWhiteSpace(password))
             {
                 ShowError("Inserisci la password.");
                 return;
@@ -3007,7 +3156,7 @@ namespace vault.iOS
                 _vaultUrl = vaultUrl;
                 _sharedQueueStore = null;
                 _sharedQueueRootPath = null;
-                _sessionPassword = password;
+                _sessionPassword = header.RequiresPassword ? password : string.Empty;
                 _currentFolder = string.Empty;
                 _manualSaveModeEnabled = false;
                 ClearPendingChangeSummary();
@@ -4284,6 +4433,18 @@ namespace vault.iOS
             string runtimeRoot = GetRuntimeTempDirectoryPath();
             Directory.CreateDirectory(runtimeRoot);
             return Path.Combine(runtimeRoot, tempName);
+        }
+
+        private static VaultFileFormat.Header ReadVaultHeader(NSUrl fileUrl)
+        {
+            using var scope = new SecurityScopeAccess(fileUrl);
+
+            string? path = fileUrl.Path;
+            if (string.IsNullOrWhiteSpace(path))
+                throw new IOException("Percorso file non valido.");
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return VaultFileFormat.ReadHeader(stream);
         }
 
         private static VaultPortableReader OpenVaultReader(NSUrl fileUrl, string password, IProgress<double>? progress = null)

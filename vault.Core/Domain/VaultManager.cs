@@ -26,6 +26,7 @@ namespace vault.Core.Domain
         private byte[]? _vaultIdBytes;
         private bool _needsVaultIdUpgrade;
         private VaultStorageFormat _storageFormat = VaultStorageFormat.Extended;
+        private VaultProtectionMode _protectionMode = VaultProtectionMode.Password;
 
         private int _failedOpenAttempts;
         private DateTime _firstFailedOpenAttemptUtc = DateTime.MinValue;
@@ -34,6 +35,10 @@ namespace vault.Core.Domain
         public string? CurrentVaultPath => _currentFilePath;
         public VaultStorageFormat? CurrentVaultStorageFormat =>
             IsVaultOpen ? _storageFormat : null;
+        public VaultProtectionMode? CurrentVaultProtectionMode =>
+            IsVaultOpen ? _protectionMode : null;
+        public bool CurrentVaultRequiresPassword =>
+            IsVaultOpen && _protectionMode == VaultProtectionMode.Password;
         public string? CurrentVaultId =>
             _vaultIdBytes == null ? null : VaultFileFormat.FormatVaultId(_vaultIdBytes);
         public bool NeedsVaultIdUpgrade => _needsVaultIdUpgrade;
@@ -46,7 +51,7 @@ namespace vault.Core.Domain
             ?? (IReadOnlyList<VaultFileItem>)Array.Empty<VaultFileItem>();
 
         // ---------- OPEN ----------
-        public void OpenVault(string path, string password, IProgress<double>? progress = null)
+        public void OpenVault(string path, string? password, IProgress<double>? progress = null)
         {
             EnsureOpenAttemptAllowed();
             ReportProgress(progress, 2);
@@ -54,14 +59,30 @@ namespace vault.Core.Domain
             if (IsVaultOpen)
                 throw new InvalidOperationException(VaultText.T("core.error.vaultAlreadyOpen"));
 
-            byte[] pwdBytes = Encoding.UTF8.GetBytes(password);
+            byte[]? pwdBytes = null;
             try
             {
                 var header = VaultFileFormat.ReadHeader(path);
                 ReportProgress(progress, 8);
 
+                _protectionMode = header.RequiresPassword
+                    ? VaultProtectionMode.Password
+                    : VaultProtectionMode.Fast;
                 _salt = header.Salt;
-                _sessionKey = KeyDerivation.DeriveKey(pwdBytes, _salt);
+
+                if (header.RequiresPassword)
+                {
+                    if (string.IsNullOrWhiteSpace(password))
+                        throw new CryptographicException(VaultText.T("core.error.passwordWrong"));
+
+                    pwdBytes = Encoding.UTF8.GetBytes(password);
+                    _sessionKey = KeyDerivation.DeriveKey(pwdBytes, _salt);
+                }
+                else
+                {
+                    _sessionKey = null;
+                }
+
                 ReportProgress(progress, 18);
 
                 _storageFormat = VaultFileFormat.GetStorageKind(header.Version) switch
@@ -75,14 +96,20 @@ namespace vault.Core.Domain
                     : VaultFileFormat.GenerateVaultIdBytes();
                 _needsVaultIdUpgrade = !header.HasVaultId;
 
-                if (VaultFileFormat.GetStorageKind(header.Version) == VaultFileFormat.VaultStorageKind.Legacy)
+                if (!header.RequiresPassword)
+                {
+                    using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    fs.Position = header.Size;
+                    _content = VaultSerializer.Deserialize(fs, CreateScaledProgress(progress, 18, 98));
+                }
+                else if (VaultFileFormat.GetStorageKind(header.Version) == VaultFileFormat.VaultStorageKind.Legacy)
                 {
                     byte[] encryptedPayload = ReadLegacyEncryptedPayloadWithProgress(path, CreateScaledProgress(progress, 18, 48));
                     ReportProgress(progress, 48);
 
                     byte[] aad = VaultFileFormat.SerializeHeaderForAad(header);
                     byte[] decrypted = AesGcmProvider.Decrypt(
-                        _sessionKey,
+                        _sessionKey!,
                         header.Nonce,
                         encryptedPayload,
                         aad,
@@ -103,7 +130,7 @@ namespace vault.Core.Domain
                     fs.Position = header.Size;
 
                     using var decryptedPayload =
-                        VaultFileFormat.CreateStreamingDecryptingReadStream(fs, _sessionKey, header);
+                        VaultFileFormat.CreateStreamingDecryptingReadStream(fs, _sessionKey!, header);
 
                     var deserializeProgress = CreateScaledProgress(progress, 20, 98);
                     _content = VaultSerializer.Deserialize(decryptedPayload, deserializeProgress);
@@ -135,21 +162,23 @@ namespace vault.Core.Domain
             }
             finally
             {
-                Array.Clear(pwdBytes, 0, pwdBytes.Length);
+                if (pwdBytes != null)
+                    Array.Clear(pwdBytes, 0, pwdBytes.Length);
             }
         }
 
         // ---------- CREATE ----------
         public void CreateVault(string path, string password) =>
-            CreateVault(path, password, VaultStorageFormat.Extended, null);
+            CreateVault(path, password, VaultStorageFormat.Extended, true, null);
 
         public void CreateVault(string path, string password, VaultStorageFormat storageFormat) =>
-            CreateVault(path, password, storageFormat, null);
+            CreateVault(path, password, storageFormat, true, null);
 
         public void CreateVault(
             string path,
-            string password,
+            string? password,
             VaultStorageFormat storageFormat,
+            bool passwordProtected = true,
             IProgress<double>? progress = null)
         {
             if (IsVaultOpen)
@@ -157,11 +186,27 @@ namespace vault.Core.Domain
 
             ReportProgress(progress, 5);
 
-            byte[] pwdBytes = Encoding.UTF8.GetBytes(password);
+            byte[]? pwdBytes = null;
             try
             {
-                _salt = VaultFileFormat.GenerateSalt();
-                _sessionKey = KeyDerivation.DeriveKey(pwdBytes, _salt);
+                _protectionMode = passwordProtected
+                    ? VaultProtectionMode.Password
+                    : VaultProtectionMode.Fast;
+                _salt = passwordProtected
+                    ? VaultFileFormat.GenerateSalt()
+                    : new byte[VaultFileFormat.SALT_SIZE];
+                if (passwordProtected)
+                {
+                    if (string.IsNullOrWhiteSpace(password))
+                        throw new ArgumentException(VaultText.T("core.error.invalidNewPassword"), nameof(password));
+
+                    pwdBytes = Encoding.UTF8.GetBytes(password);
+                    _sessionKey = KeyDerivation.DeriveKey(pwdBytes, _salt);
+                }
+                else
+                {
+                    _sessionKey = null;
+                }
                 ReportProgress(progress, 22);
 
                 _content = new VaultContent
@@ -182,7 +227,8 @@ namespace vault.Core.Domain
             }
             finally
             {
-                Array.Clear(pwdBytes, 0, pwdBytes.Length);
+                if (pwdBytes != null)
+                    Array.Clear(pwdBytes, 0, pwdBytes.Length);
             }
         }
 
@@ -548,6 +594,7 @@ namespace vault.Core.Domain
 
                 _sessionKey = newSessionKey;
                 _salt = newSalt;
+                _protectionMode = VaultProtectionMode.Password;
 
                 Save(CreateScaledProgress(progress, 20, 100));
 
@@ -566,6 +613,37 @@ namespace vault.Core.Domain
             finally
             {
                 Array.Clear(pwdBytes, 0, pwdBytes.Length);
+            }
+        }
+
+        public void DisablePasswordProtection(IProgress<double>? progress = null)
+        {
+            EnsureVaultOpen();
+            if (_protectionMode == VaultProtectionMode.Fast)
+            {
+                ReportProgress(progress, 100);
+                return;
+            }
+
+            byte[]? previousSessionKey = _sessionKey;
+            byte[]? previousSalt = _salt;
+            try
+            {
+                _sessionKey = null;
+                _salt = new byte[VaultFileFormat.SALT_SIZE];
+                _protectionMode = VaultProtectionMode.Fast;
+                ReportProgress(progress, 10);
+                Save(CreateScaledProgress(progress, 10, 100));
+
+                if (previousSessionKey != null)
+                    Array.Clear(previousSessionKey, 0, previousSessionKey.Length);
+            }
+            catch
+            {
+                _sessionKey = previousSessionKey;
+                _salt = previousSalt;
+                _protectionMode = VaultProtectionMode.Password;
+                throw;
             }
         }
 
@@ -603,10 +681,20 @@ namespace vault.Core.Domain
         // ---------- SAVE ----------
         private void Save(IProgress<double>? progress = null)
         {
-            if (!IsVaultOpen || _sessionKey == null || _currentFilePath == null || _salt == null)
+            if (!IsVaultOpen || _currentFilePath == null || _salt == null)
                 return;
             if (_vaultIdBytes == null || _vaultIdBytes.Length != VaultFileFormat.VAULT_ID_SIZE)
                 throw new InvalidOperationException("VaultId non disponibile.");
+
+            if (_protectionMode == VaultProtectionMode.Fast)
+            {
+                SaveFastFormat(_currentFilePath, progress);
+                _needsVaultIdUpgrade = false;
+                return;
+            }
+
+            if (_sessionKey == null)
+                throw new InvalidOperationException(VaultText.T("core.error.noVaultOpen"));
 
             if (_storageFormat == VaultStorageFormat.Legacy)
             {
@@ -633,6 +721,58 @@ namespace vault.Core.Domain
                 return;
 
             Save(progress);
+        }
+
+        private void SaveFastFormat(string vaultPath, IProgress<double>? progress = null)
+        {
+            bool ultraContent = _storageFormat == VaultStorageFormat.Ultra;
+            _content!.Metadata.Version = ultraContent ? 4 : 3;
+
+            if (_storageFormat == VaultStorageFormat.Legacy)
+            {
+                long estimatedSize = VaultSerializer.EstimateSerializedSize(_content!);
+                if (estimatedSize > MaxLegacyVaultPlaintextBytes)
+                {
+                    throw new InvalidOperationException(
+                        VaultText.T("core.error.legacySizeLimit"));
+                }
+            }
+
+            byte version = _storageFormat switch
+            {
+                VaultStorageFormat.Legacy => VaultFileFormat.FAST_LEGACY_VERSION_WITH_ID,
+                VaultStorageFormat.Ultra => VaultFileFormat.FAST_ULTRA_STREAMING_VERSION_WITH_ID,
+                _ => VaultFileFormat.FAST_STREAMING_VERSION_WITH_ID
+            };
+
+            byte[] nonce = new byte[VaultFileFormat.NONCE_SIZE];
+            string tempPath = vaultPath + ".tmp";
+            try
+            {
+                using (var tempFile = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    tempFile.Write(VaultFileFormat.MAGIC, 0, VaultFileFormat.MAGIC.Length);
+                    tempFile.WriteByte(version);
+                    tempFile.Write(_salt!, 0, VaultFileFormat.SALT_SIZE);
+                    tempFile.Write(nonce, 0, VaultFileFormat.NONCE_SIZE);
+                    tempFile.Write(_vaultIdBytes!, 0, _vaultIdBytes!.Length);
+
+                    ReportProgress(progress, 4);
+                    VaultSerializer.SerializeToStream(
+                        _content!,
+                        tempFile,
+                        CreateScaledProgress(progress, 4, 94),
+                        ultraContent: ultraContent);
+                }
+
+                ReplaceVaultFile(tempPath, vaultPath);
+                ReportProgress(progress, 100);
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                    TrySecureDeleteFile(tempPath);
+            }
         }
 
         private void SaveLegacyFormat(
@@ -832,6 +972,7 @@ namespace vault.Core.Domain
             _needsVaultIdUpgrade = false;
             _currentFilePath = null;
             _storageFormat = VaultStorageFormat.Extended;
+            _protectionMode = VaultProtectionMode.Password;
         }
 
         // ---------- HELPERS ----------
@@ -1463,6 +1604,7 @@ namespace vault.Core.Domain
             _needsVaultIdUpgrade = false;
             _currentFilePath = null;
             _storageFormat = VaultStorageFormat.Extended;
+            _protectionMode = VaultProtectionMode.Password;
         }
 
         private static void TrySecureDeleteFile(string path)

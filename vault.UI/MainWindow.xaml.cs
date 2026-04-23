@@ -86,6 +86,7 @@ namespace vault.UI
             LoadUiPreferences();
             VaultText.SetLanguage(UiText.CurrentLanguage);
             ApplyLocalization();
+            UpdateCreatePasswordInputsState();
             ConfigureStartupMode();
             Topmost = false;
 
@@ -144,6 +145,8 @@ namespace vault.UI
                 PopulateLanguageComboBox();
 
                 CreateVaultGroupBox.Header = T("main.group.create");
+                CreateProtectWithPasswordCheckBox.Content = T("main.label.protectWithPassword");
+                CreateProtectionNoteTextBlock.Text = T("main.note.fastMode");
                 CreatePasswordLabelTextBlock.Text = T("main.label.masterPassword");
                 CreateConfirmPasswordLabelTextBlock.Text = T("main.label.confirmPassword");
                 CreateFormatLabelTextBlock.Text = T("main.label.vaultFormat");
@@ -413,16 +416,17 @@ namespace vault.UI
 
         private async void CreateVault_Click(object sender, RoutedEventArgs e)
         {
+            bool passwordProtected = CreateProtectWithPasswordCheckBox.IsChecked != false;
             string password = CreatePasswordBox.Password;
             string confirmPassword = CreateConfirmPasswordBox.Password;
 
-            if (string.IsNullOrWhiteSpace(password))
+            if (passwordProtected && string.IsNullOrWhiteSpace(password))
             {
                 MessageBox.Show(T("main.msg.enterCreatePassword"));
                 return;
             }
 
-            if (password != confirmPassword)
+            if (passwordProtected && password != confirmPassword)
             {
                 MessageBox.Show(T("main.msg.passwordMismatch"));
                 return;
@@ -446,7 +450,7 @@ namespace vault.UI
                 }
 
                 await RunLongOperationAsync(
-                    progress => Task.Run(() => _vaultManager.CreateVault(dialog.FileName, password, selectedFormat, progress)),
+                    progress => Task.Run(() => _vaultManager.CreateVault(dialog.FileName, passwordProtected ? password : string.Empty, selectedFormat, passwordProtected, progress)),
                     T("main.progress.creatingVault"));
 
                 _currentFolderPath = string.Empty;
@@ -465,6 +469,8 @@ namespace vault.UI
                 confirmPassword = string.Empty;
                 CreatePasswordBox.Password = string.Empty;
                 CreateConfirmPasswordBox.Password = string.Empty;
+                CreateProtectWithPasswordCheckBox.IsChecked = true;
+                UpdateCreatePasswordInputsState();
             }
         }
 
@@ -580,7 +586,8 @@ namespace vault.UI
                 return false;
             }
 
-            if (string.IsNullOrWhiteSpace(password))
+            bool requiresPassword = VaultFileFormat.ReadHeader(path).RequiresPassword;
+            if (requiresPassword && string.IsNullOrWhiteSpace(password))
             {
                 MessageBox.Show(T("main.msg.enterOpenPassword"));
                 return false;
@@ -589,7 +596,7 @@ namespace vault.UI
             try
             {
                 await RunLongOperationAsync(
-                    progress => Task.Run(() => _vaultManager.OpenVault(path, password, progress)),
+                    progress => Task.Run(() => _vaultManager.OpenVault(path, requiresPassword ? password : string.Empty, progress)),
                     T("main.progress.openingVault"));
 
                 if (_vaultManager.NeedsVaultIdUpgrade)
@@ -624,6 +631,24 @@ namespace vault.UI
             {
                 MessageBox.Show(Tf("main.msg.unexpectedError", ex.Message), T("common.error"), MessageBoxButton.OK, MessageBoxImage.Error);
                 return false;
+            }
+        }
+
+        private void CreateProtectWithPasswordCheckBox_Changed(object sender, RoutedEventArgs e)
+        {
+            UpdateCreatePasswordInputsState();
+        }
+
+        private void UpdateCreatePasswordInputsState()
+        {
+            bool passwordProtected = CreateProtectWithPasswordCheckBox.IsChecked != false;
+            CreatePasswordBox.IsEnabled = passwordProtected;
+            CreateConfirmPasswordBox.IsEnabled = passwordProtected;
+
+            if (!passwordProtected)
+            {
+                CreatePasswordBox.Password = string.Empty;
+                CreateConfirmPasswordBox.Password = string.Empty;
             }
         }
 
@@ -943,8 +968,10 @@ namespace vault.UI
         {
             VaultStorageFormat currentFormat =
                 _vaultManager.CurrentVaultStorageFormat ?? VaultStorageFormat.Extended;
+            VaultProtectionMode currentProtectionMode =
+                _vaultManager.CurrentVaultProtectionMode ?? VaultProtectionMode.Password;
 
-            var settingsWindow = new VaultSettingsWindow(currentFormat) { Owner = this };
+            var settingsWindow = new VaultSettingsWindow(currentFormat, currentProtectionMode) { Owner = this };
             if (settingsWindow.ShowDialog() != true)
             {
                 settingsWindow.ClearSensitiveInputs();
@@ -956,7 +983,18 @@ namespace vault.UI
             {
                 var completedActions = new List<string>();
 
-                if (settingsWindow.ShouldChangePassword)
+                if (settingsWindow.ShouldDisablePasswordProtection)
+                {
+                    await RunLongOperationAsync(
+                        progress => Task.Run(() =>
+                        {
+                            _vaultManager.DisablePasswordProtection(progress);
+                            return 0;
+                        }),
+                        T("main.progress.updatingPassword"));
+                    completedActions.Add(T("main.msg.passwordProtectionDisabled"));
+                }
+                else if (settingsWindow.ShouldEnablePasswordProtection || settingsWindow.ShouldChangePassword)
                 {
                     await RunLongOperationAsync(
                         progress => Task.Run(() =>
@@ -965,7 +1003,9 @@ namespace vault.UI
                             return 0;
                         }),
                         T("main.progress.updatingPassword"));
-                    completedActions.Add(T("main.msg.passwordUpdated"));
+                    completedActions.Add(settingsWindow.ShouldEnablePasswordProtection
+                        ? T("main.msg.passwordProtectionEnabled")
+                        : T("main.msg.passwordUpdated"));
                 }
 
                 if (settingsWindow.ShouldChangeStorageFormat)
@@ -1028,12 +1068,13 @@ namespace vault.UI
             if (DateTime.UtcNow - _lastUserActivityUtc < AutoVaultLockTimeout)
                 return;
 
+            bool requiresPassword = _vaultManager.CurrentVaultRequiresPassword != false;
             _vaultManager.CloseVault();
             _currentFolderPath = string.Empty;
             AggiornaUI();
 
             MessageBox.Show(
-                T("main.msg.autoLock"),
+                T(requiresPassword ? "main.msg.autoLock" : "main.msg.autoLockFast"),
                 T("main.title.autoLock"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);

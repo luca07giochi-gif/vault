@@ -47,10 +47,47 @@
     <string>1.2.3</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleTypeName</key>
+        <string>Vault File</string>
+        <key>CFBundleTypeRole</key>
+        <string>Editor</string>
+        <key>LSHandlerRank</key>
+        <string>Owner</string>
+        <key>LSItemContentTypes</key>
+        <array>
+          <string>com.luca07giochi.vault</string>
+        </array>
+      </dict>
+    </array>
     <key>LSRequiresIPhoneOS</key>
     <true />
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true />
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+      <dict>
+        <key>UTTypeIdentifier</key>
+        <string>com.luca07giochi.vault</string>
+        <key>UTTypeDescription</key>
+        <string>Vault File</string>
+        <key>UTTypeConformsTo</key>
+        <array>
+          <string>public.data</string>
+        </array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+          <key>public.filename-extension</key>
+          <array>
+            <string>vault</string>
+          </array>
+          <key>public.mime-type</key>
+          <string>application/x-vault</string>
+        </dict>
+      </dict>
+    </array>
     <key>UIFileSharingEnabled</key>
     <true />
     <key>UILaunchStoryboardName</key>

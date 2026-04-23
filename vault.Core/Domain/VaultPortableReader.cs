@@ -20,6 +20,7 @@ namespace vault.Core.Domain
 
         private readonly VaultContent _content;
         private VaultStorageFormat _storageFormat;
+        private VaultProtectionMode _protectionMode;
         private byte[] _salt;
         private readonly string _sessionDirectory;
         private readonly Dictionary<Guid, FileContentHandle> _fileContent = new();
@@ -31,7 +32,8 @@ namespace vault.Core.Domain
         private VaultPortableReader(
             VaultContent content,
             VaultStorageFormat storageFormat,
-            byte[] sessionKey,
+            VaultProtectionMode protectionMode,
+            byte[]? sessionKey,
             byte[] salt,
             byte[] vaultIdBytes,
             bool needsVaultIdUpgrade,
@@ -40,7 +42,10 @@ namespace vault.Core.Domain
         {
             _content = content ?? throw new ArgumentNullException(nameof(content));
             _storageFormat = storageFormat;
-            _sessionKey = sessionKey ?? throw new ArgumentNullException(nameof(sessionKey));
+            _protectionMode = protectionMode;
+            _sessionKey = protectionMode == VaultProtectionMode.Password
+                ? sessionKey ?? throw new ArgumentNullException(nameof(sessionKey))
+                : sessionKey;
             _salt = salt ?? throw new ArgumentNullException(nameof(salt));
             _vaultIdBytes = vaultIdBytes?.ToArray() ?? throw new ArgumentNullException(nameof(vaultIdBytes));
             _needsVaultIdUpgrade = needsVaultIdUpgrade;
@@ -55,6 +60,8 @@ namespace vault.Core.Domain
         }
 
         public VaultStorageFormat StorageFormat => _storageFormat;
+        public VaultProtectionMode ProtectionMode => _protectionMode;
+        public bool RequiresPassword => _protectionMode == VaultProtectionMode.Password;
         public string VaultId => VaultFileFormat.FormatVaultId(_vaultIdBytes);
         public bool NeedsVaultIdUpgrade => _needsVaultIdUpgrade;
 
@@ -381,6 +388,7 @@ namespace vault.Core.Domain
                 newSessionKey = KeyDerivation.DeriveKey(pwdBytes, newSalt);
                 _sessionKey = newSessionKey;
                 _salt = newSalt;
+                _protectionMode = VaultProtectionMode.Password;
                 IsDirty = true;
 
                 if (previousSessionKey != null && !ReferenceEquals(previousSessionKey, newSessionKey))
@@ -399,6 +407,21 @@ namespace vault.Core.Domain
             {
                 Array.Clear(pwdBytes, 0, pwdBytes.Length);
             }
+        }
+
+        public void DisablePasswordProtection()
+        {
+            ThrowIfDisposed();
+            if (_protectionMode == VaultProtectionMode.Fast)
+                return;
+
+            if (_sessionKey != null && _sessionKey.Length > 0)
+                Array.Clear(_sessionKey, 0, _sessionKey.Length);
+
+            _sessionKey = null;
+            _salt = new byte[VaultFileFormat.SALT_SIZE];
+            _protectionMode = VaultProtectionMode.Fast;
+            IsDirty = true;
         }
 
         public void ChangeStorageFormat(VaultStorageFormat newFormat)
@@ -451,8 +474,17 @@ namespace vault.Core.Domain
                 throw new ArgumentNullException(nameof(output));
             if (!output.CanWrite)
                 throw new InvalidOperationException(VaultText.T("core.format.targetNotWritable"));
-            if (_sessionKey == null || _sessionKey.Length == 0)
+            if (_protectionMode == VaultProtectionMode.Password &&
+                (_sessionKey == null || _sessionKey.Length == 0))
                 throw new InvalidOperationException(VaultText.T("core.error.noVaultOpen"));
+
+            if (_protectionMode == VaultProtectionMode.Fast)
+            {
+                SaveFastToStream(output, progress);
+                IsDirty = false;
+                _needsVaultIdUpgrade = false;
+                return;
+            }
 
             if (_storageFormat == VaultStorageFormat.Legacy)
             {
@@ -472,7 +504,7 @@ namespace vault.Core.Domain
 
         public static VaultPortableReader Open(
             byte[] vaultBytes,
-            string password,
+            string? password,
             bool allowUltra = false,
             IProgress<double>? progress = null)
         {
@@ -485,7 +517,7 @@ namespace vault.Core.Domain
 
         public static VaultPortableReader Open(
             Stream vaultStream,
-            string password,
+            string? password,
             bool allowUltra = false,
             IProgress<double>? progress = null)
         {
@@ -493,9 +525,6 @@ namespace vault.Core.Domain
                 throw new ArgumentNullException(nameof(vaultStream));
             if (!vaultStream.CanRead)
                 throw new InvalidOperationException(VaultText.T("core.format.sourceNotReadable"));
-
-            if (string.IsNullOrWhiteSpace(password))
-                throw new CryptographicException(VaultText.T("core.error.passwordWrong"));
 
             if (vaultStream.CanSeek)
             {
@@ -510,11 +539,21 @@ namespace vault.Core.Domain
             var header = VaultFileFormat.ReadHeader(vaultStream);
             ReportProgress(progress, 8);
 
-            byte[] pwdBytes = Encoding.UTF8.GetBytes(password);
+            VaultProtectionMode protectionMode = header.RequiresPassword
+                ? VaultProtectionMode.Password
+                : VaultProtectionMode.Fast;
+            byte[]? pwdBytes = null;
             byte[] sessionKey = Array.Empty<byte>();
             try
             {
-                sessionKey = KeyDerivation.DeriveKey(pwdBytes, header.Salt);
+                if (protectionMode == VaultProtectionMode.Password)
+                {
+                    if (string.IsNullOrWhiteSpace(password))
+                        throw new CryptographicException(VaultText.T("core.error.passwordWrong"));
+
+                    pwdBytes = Encoding.UTF8.GetBytes(password);
+                    sessionKey = KeyDerivation.DeriveKey(pwdBytes, header.Salt);
+                }
                 ReportProgress(progress, 20);
 
                 VaultStorageFormat format = VaultFileFormat.GetStorageKind(header.Version) switch
@@ -532,18 +571,21 @@ namespace vault.Core.Domain
                 if (format == VaultStorageFormat.Ultra && !allowUltra)
                     throw new NotSupportedException(VaultText.T("core.error.ultraNotSupportedInWeb"));
 
-                OpenSessionData opened = format switch
-                {
-                    VaultStorageFormat.Legacy => ReadLegacy(vaultStream, header, sessionKey, sessionDirectory, progress),
-                    VaultStorageFormat.Ultra or VaultStorageFormat.Extended => ReadStreaming(vaultStream, header, sessionKey, sessionDirectory, progress),
-                    _ => throw new InvalidDataException(VaultText.T("core.error.unsupportedVaultVersion"))
-                };
+                OpenSessionData opened = protectionMode == VaultProtectionMode.Fast
+                    ? ReadPlain(vaultStream, sessionDirectory, progress)
+                    : format switch
+                    {
+                        VaultStorageFormat.Legacy => ReadLegacy(vaultStream, header, sessionKey, sessionDirectory, progress),
+                        VaultStorageFormat.Ultra or VaultStorageFormat.Extended => ReadStreaming(vaultStream, header, sessionKey, sessionDirectory, progress),
+                        _ => throw new InvalidDataException(VaultText.T("core.error.unsupportedVaultVersion"))
+                    };
 
                 ReportProgress(progress, 100);
                 return new VaultPortableReader(
                     opened.Content,
                     format,
-                    sessionKey,
+                    protectionMode,
+                    protectionMode == VaultProtectionMode.Password ? sessionKey : null,
                     header.Salt.ToArray(),
                     vaultIdBytes,
                     needsVaultIdUpgrade,
@@ -560,7 +602,69 @@ namespace vault.Core.Domain
             }
             finally
             {
-                Array.Clear(pwdBytes, 0, pwdBytes.Length);
+                if (pwdBytes != null)
+                    Array.Clear(pwdBytes, 0, pwdBytes.Length);
+            }
+        }
+
+        public static VaultPortableReader CreateNew(
+            VaultStorageFormat storageFormat,
+            string? password,
+            bool passwordProtected = true)
+        {
+            if (storageFormat != VaultStorageFormat.Legacy &&
+                storageFormat != VaultStorageFormat.Extended &&
+                storageFormat != VaultStorageFormat.Ultra)
+            {
+                throw new ArgumentOutOfRangeException(nameof(storageFormat), VaultText.T("core.error.unsupportedStorageFormat"));
+            }
+
+            byte[]? pwdBytes = null;
+            try
+            {
+                VaultProtectionMode protectionMode = passwordProtected
+                    ? VaultProtectionMode.Password
+                    : VaultProtectionMode.Fast;
+
+                byte[] salt = passwordProtected
+                    ? VaultFileFormat.GenerateSalt()
+                    : new byte[VaultFileFormat.SALT_SIZE];
+
+                byte[]? sessionKey = null;
+                if (passwordProtected)
+                {
+                    if (string.IsNullOrWhiteSpace(password))
+                        throw new ArgumentException(VaultText.T("core.error.invalidNewPassword"), nameof(password));
+
+                    pwdBytes = Encoding.UTF8.GetBytes(password);
+                    sessionKey = KeyDerivation.DeriveKey(pwdBytes, salt);
+                }
+
+                var content = new VaultContent
+                {
+                    Metadata = new VaultMetadata
+                    {
+                        Version = storageFormat == VaultStorageFormat.Ultra ? 4 : 3,
+                        CreatedTicks = DateTime.UtcNow.Ticks
+                    },
+                    Files = new List<VaultFileItem>()
+                };
+
+                return new VaultPortableReader(
+                    content,
+                    storageFormat,
+                    protectionMode,
+                    sessionKey,
+                    salt,
+                    VaultFileFormat.GenerateVaultIdBytes(),
+                    needsVaultIdUpgrade: false,
+                    sessionDirectory: CreateSessionDirectory(),
+                    initialContent: null);
+            }
+            finally
+            {
+                if (pwdBytes != null)
+                    Array.Clear(pwdBytes, 0, pwdBytes.Length);
             }
         }
 
@@ -640,6 +744,31 @@ namespace vault.Core.Domain
 
             ReportProgress(progress, 100);
             return output.ToArray();
+        }
+
+        private void SaveFastToStream(Stream output, IProgress<double>? progress)
+        {
+            bool ultraContent = _storageFormat == VaultStorageFormat.Ultra;
+            _content.Metadata.Version = ultraContent
+                ? PlaintextFormatVersionUltra
+                : PlaintextFormatVersionStandard;
+
+            byte version = _storageFormat switch
+            {
+                VaultStorageFormat.Legacy => VaultFileFormat.FAST_LEGACY_VERSION_WITH_ID,
+                VaultStorageFormat.Ultra => VaultFileFormat.FAST_ULTRA_STREAMING_VERSION_WITH_ID,
+                _ => VaultFileFormat.FAST_STREAMING_VERSION_WITH_ID
+            };
+
+            output.Write(VaultFileFormat.MAGIC, 0, VaultFileFormat.MAGIC.Length);
+            output.WriteByte(version);
+            output.Write(_salt, 0, VaultFileFormat.SALT_SIZE);
+            output.Write(new byte[VaultFileFormat.NONCE_SIZE], 0, VaultFileFormat.NONCE_SIZE);
+            output.Write(_vaultIdBytes, 0, _vaultIdBytes.Length);
+
+            ReportProgress(progress, 5);
+            WritePlaintext(output, ultraContent, CreateScaledProgress(progress, 5, 100));
+            ReportProgress(progress, 100);
         }
 
         private void SaveStreamingToStream(Stream output, bool ultraContent, IProgress<double>? progress)
@@ -1111,6 +1240,16 @@ namespace vault.Core.Domain
                 Content = Array.Empty<byte>(),
                 ContentChunks = new List<byte[]>()
             };
+        }
+
+        private static OpenSessionData ReadPlain(
+            Stream vaultStream,
+            string sessionDirectory,
+            IProgress<double>? progress)
+        {
+            VaultContent content = VaultSerializer.Deserialize(vaultStream, CreateScaledProgress(progress, 20, 98));
+            Dictionary<Guid, FileContentHandle> contentHandles = BuildHandlesFromInMemoryContent(content, sessionDirectory);
+            return new OpenSessionData(content, contentHandles);
         }
 
         private static FileContentHandle ReadStandardPayloadToHandle(

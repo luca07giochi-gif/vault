@@ -35,6 +35,12 @@ namespace vault.iOS
             MainViewController.CleanupStaleRuntimeTemporaryFiles();
         }
 
+        public override bool OpenUrl(UIApplication app, NSUrl url, NSDictionary options)
+        {
+            MainViewController? controller = ResolveMainViewController();
+            return controller?.HandleIncomingVaultUrl(url) ?? false;
+        }
+
         private MainViewController? ResolveMainViewController()
         {
             if (Window?.RootViewController is UINavigationController nav)

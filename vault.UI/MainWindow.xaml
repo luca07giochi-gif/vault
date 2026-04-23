@@ -314,6 +314,20 @@
 
                 <GroupBox x:Name="CreateVaultGroupBox" Grid.Column="0" Header="Crea nuovo vault" Foreground="#FFE7EAF0" BorderBrush="#FF313848" Padding="12">
                     <StackPanel>
+                        <CheckBox x:Name="CreateProtectWithPasswordCheckBox"
+                                  Content="Proteggi con password"
+                                  IsChecked="True"
+                                  Checked="CreateProtectWithPasswordCheckBox_Changed"
+                                  Unchecked="CreateProtectWithPasswordCheckBox_Changed"
+                                  Margin="0,0,0,6"/>
+
+                        <TextBlock x:Name="CreateProtectionNoteTextBlock"
+                                   Text="Se disattivi la protezione, il vault usera la modalita veloce senza password."
+                                   Foreground="#FFB6C0D4"
+                                   FontSize="11"
+                                   TextWrapping="Wrap"
+                                   Margin="0,0,0,10"/>
+
                         <TextBlock x:Name="CreatePasswordLabelTextBlock" Text="Password master" Margin="0,0,0,6"/>
                         <PasswordBox x:Name="CreatePasswordBox"/>
 

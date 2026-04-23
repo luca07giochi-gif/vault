@@ -52,6 +52,8 @@ namespace vault.UI.Localization
                 ["main.languageLabel"] = Lang("Lingua", "Language", "Idioma", "Langue"),
                 ["main.group.create"] = Lang("Crea nuovo vault", "Create new vault", "Crear nueva boveda", "Creer un nouveau coffre"),
                 ["main.group.open"] = Lang("Apri vault esistente", "Open existing vault", "Abrir boveda existente", "Ouvrir un coffre existant"),
+                ["main.label.protectWithPassword"] = Lang("Proteggi con password", "Protect with password", "Proteger con contrasena", "Proteger avec mot de passe"),
+                ["main.note.fastMode"] = Lang("Se disattivi la protezione, il vault usera la modalita veloce senza password.", "If protection is disabled, the vault will use fast mode without a password.", "Si desactivas la proteccion, la boveda usara el modo rapido sin contrasena.", "Si vous desactivez la protection, le coffre utilisera le mode rapide sans mot de passe."),
                 ["main.label.masterPassword"] = Lang("Password master", "Master password", "Contrasena maestra", "Mot de passe maitre"),
                 ["main.label.confirmPassword"] = Lang("Conferma password", "Confirm password", "Confirmar contrasena", "Confirmer le mot de passe"),
                 ["main.label.vaultFormat"] = Lang("Formato vault", "Vault format", "Formato de boveda", "Format du coffre"),
@@ -180,11 +182,14 @@ namespace vault.UI.Localization
                 ["main.msg.tempCleanup"] = Lang("Le copie temporanee verranno cancellate automaticamente quando possibile.", "Temporary copies will be deleted automatically when possible.", "Las copias temporales se eliminaran automaticamente cuando sea posible.", "Les copies temporaires seront supprimees automatiquement quand possible."),
                 ["main.progress.updatingPassword"] = Lang("Aggiornamento password in corso...", "Updating password...", "Actualizando contrasena...", "Mise a jour du mot de passe..."),
                 ["main.msg.passwordUpdated"] = Lang("Password aggiornata con successo.", "Password updated successfully.", "Contrasena actualizada con exito.", "Mot de passe mis a jour avec succes."),
+                ["main.msg.passwordProtectionEnabled"] = Lang("Protezione con password attivata.", "Password protection enabled.", "Proteccion con contrasena activada.", "Protection par mot de passe activee."),
+                ["main.msg.passwordProtectionDisabled"] = Lang("Modalita veloce attivata: il vault non richiede piu la password.", "Fast mode enabled: the vault no longer requires a password.", "Modo rapido activado: la boveda ya no requiere contrasena.", "Mode rapide active : le coffre ne demande plus de mot de passe."),
                 ["main.progress.convertingFormat"] = Lang("Conversione formato vault in corso...", "Converting vault format...", "Convirtiendo formato de vault...", "Conversion du format du coffre..."),
                 ["main.msg.formatConverted"] = Lang("Formato vault convertito in {0}.", "Vault format converted to {0}.", "Formato de vault convertido a {0}.", "Format du coffre converti en {0}."),
                 ["main.msg.noChangesApplied"] = Lang("Nessuna modifica applicata.", "No changes applied.", "No se aplicaron cambios.", "Aucun changement applique."),
                 ["main.msg.errorSettings"] = Lang("Errore durante le impostazioni vault: {0}", "Error in vault settings: {0}", "Error en ajustes de boveda: {0}", "Erreur dans les parametres du coffre : {0}"),
                 ["main.msg.autoLock"] = Lang("Vault chiuso automaticamente dopo 1 ora di inattivita.\nReinserisci la password per riaprirlo.", "Vault closed automatically after 1 hour of inactivity.\nEnter the password again to reopen it.", "Vault cerrado automaticamente despues de 1 hora de inactividad.\nIntroduce la contrasena de nuevo para abrirlo.", "Coffre ferme automatiquement apres 1 heure d'inactivite.\nEntrez de nouveau le mot de passe pour le rouvrir."),
+                ["main.msg.autoLockFast"] = Lang("Vault chiuso automaticamente dopo 1 ora di inattivita.", "Vault closed automatically after 1 hour of inactivity.", "Vault cerrado automaticamente despues de 1 hora de inactividad.", "Coffre ferme automatiquement apres 1 heure d'inactivite."),
                 ["main.title.autoLock"] = Lang("Blocco automatico", "Automatic lock", "Bloqueo automatico", "Verrouillage automatique"),
                 ["main.msg.operationNotCompleted"] = Lang("Operazione non completata: {0}", "Operation not completed: {0}", "Operacion no completada: {0}", "Operation non terminee : {0}"),
                 ["main.msg.openedVaultPath"] = Lang("Vault aperto ({0}): {1}", "Opened vault ({0}): {1}", "Vault abierto ({0}): {1}", "Coffre ouvert ({0}) : {1}"),
@@ -231,7 +236,9 @@ namespace vault.UI.Localization
 
                 ["settings.windowTitle"] = Lang("Impostazioni Vault", "Vault Settings", "Configuracion de Vault", "Parametres du Coffre"),
                 ["settings.header"] = Lang("Impostazioni vault", "Vault settings", "Configuracion de vault", "Parametres du coffre"),
-                ["settings.passwordHeader"] = Lang("Cambio password (opzionale)", "Password change (optional)", "Cambio de contrasena (opcional)", "Changement de mot de passe (optionnel)"),
+                ["settings.label.protectWithPassword"] = Lang("Proteggi con password", "Protect with password", "Proteger con contrasena", "Proteger avec mot de passe"),
+                ["settings.note.fastMode"] = Lang("Se disattivi la protezione, il vault usera la modalita veloce senza password.", "If protection is disabled, the vault will use fast mode without a password.", "Si desactivas la proteccion, la boveda usara el modo rapido sin contrasena.", "Si vous desactivez la protection, le coffre utilisera le mode rapide sans mot de passe."),
+                ["settings.passwordHeader"] = Lang("Password del vault", "Vault password", "Contrasena del vault", "Mot de passe du coffre"),
                 ["settings.label.newPassword"] = Lang("Nuova password master", "New master password", "Nueva contrasena maestra", "Nouveau mot de passe maitre"),
                 ["settings.label.confirmPassword"] = Lang("Conferma nuova password", "Confirm new password", "Confirmar nueva contrasena", "Confirmer le nouveau mot de passe"),
                 ["settings.formatHeader"] = Lang("Conversione formato vault", "Vault format conversion", "Conversion de formato vault", "Conversion du format du coffre"),
@@ -239,6 +246,7 @@ namespace vault.UI.Localization
                 ["settings.label.newFormat"] = Lang("Nuovo formato", "New format", "Nuevo formato", "Nouveau format"),
                 ["settings.msg.noChange"] = Lang("Nessuna modifica selezionata.", "No changes selected.", "No se seleccionaron cambios.", "Aucune modification selectionnee."),
                 ["settings.msg.enterNewPassword"] = Lang("Inserisci una nuova password.", "Enter a new password.", "Introduce una nueva contrasena.", "Entrez un nouveau mot de passe."),
+                ["settings.msg.enterPasswordToProtect"] = Lang("Inserisci una password per attivare la protezione.", "Enter a password to enable protection.", "Introduce una contrasena para activar la proteccion.", "Entrez un mot de passe pour activer la protection."),
                 ["settings.msg.passwordMismatch"] = Lang("Le password non coincidono.", "Passwords do not match.", "Las contrasenas no coinciden.", "Les mots de passe ne correspondent pas.")
             };
 

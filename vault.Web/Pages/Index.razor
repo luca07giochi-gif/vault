@@ -1,16 +1,73 @@
 @page "/"
 @implements IDisposable
+@using vault.Core
 @using vault.Core.Domain
 @inject IJSRuntime JS
 
 <h1>Apri Vault</h1>
 
 <p class="hint">
-    Questa versione web e separata dalla desktop. Supporta apertura e modifica di vault esistenti
-    (formati legacy/esteso). Il formato ultra non e supportato nel browser.
+    Questa versione web e separata dalla desktop. Supporta creazione, apertura e modifica di vault
+    legacy o estesi, con password oppure in modalita veloce. Il formato ultra non e supportato nel browser.
 </p>
 
 <section class="panel">
+    <h2>Crea nuovo vault</h2>
+    <div class="row">
+        <label for="createVaultName">Nome file</label>
+        <input id="createVaultName"
+               @bind="_createVaultName"
+               @bind:event="oninput"
+               placeholder="vault_web.vault" />
+    </div>
+
+    <div class="row">
+        <label for="createVaultFormat">Formato vault</label>
+        <select id="createVaultFormat" @bind="_createStorageFormat">
+            <option value="legacy">Compatibile (legacy)</option>
+            <option value="extended">Esteso</option>
+            <option value="ultra">Ultra</option>
+        </select>
+    </div>
+
+    <div class="row">
+        <label>
+            <input type="checkbox" @bind="_createProtectWithPassword" />
+            Proteggi con password
+        </label>
+    </div>
+
+    <div class="row small">
+        Se disattivi la protezione, il vault usera la modalita veloce senza password.
+    </div>
+
+    <div class="row">
+        <label for="createPassword">Password</label>
+        <input id="createPassword"
+               type="password"
+               @bind="_createPassword"
+               @bind:event="oninput"
+               placeholder="Password master"
+               disabled="@(!_createProtectWithPassword)" />
+    </div>
+
+    <div class="row">
+        <label for="createConfirmPassword">Conferma password</label>
+        <input id="createConfirmPassword"
+               type="password"
+               @bind="_createConfirmPassword"
+               @bind:event="oninput"
+               placeholder="Conferma password"
+               disabled="@(!_createProtectWithPassword)" />
+    </div>
+
+    <div class="row buttons">
+        <button @onclick="CreateVaultAsync" disabled="@_isBusy">Crea vault</button>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Apri vault esistente</h2>
     <div class="row">
         <label for="vaultFile">File .vault</label>
         <InputFile id="vaultFile" accept=".vault" OnChange="OnVaultFileSelected" />
@@ -27,6 +84,10 @@
                @bind="_password"
                @bind:event="oninput"
                placeholder="Password master" />
+    </div>
+
+    <div class="row small">
+        Se il vault e in modalita veloce, puoi lasciare la password vuota.
     </div>
 
     <div class="row buttons">
@@ -53,6 +114,52 @@
 
 @if (_reader is not null)
 {
+    <section class="panel">
+        <div class="row">
+            <label for="settingsVaultFormat">Formato vault</label>
+            <select id="settingsVaultFormat" @bind="_settingsStorageFormat" disabled="@_isBusy">
+                <option value="legacy">Compatibile (legacy)</option>
+                <option value="extended">Esteso</option>
+                <option value="ultra">Ultra</option>
+            </select>
+        </div>
+
+        <div class="row">
+            <label>
+                <input type="checkbox" @bind="_settingsProtectWithPassword" disabled="@_isBusy" />
+                Proteggi con password
+            </label>
+        </div>
+
+        <div class="row small">
+            Se disattivi la protezione, il vault usera la modalita veloce senza password.
+        </div>
+
+        <div class="row">
+            <label for="settingsNewPassword">Nuova password</label>
+            <input id="settingsNewPassword"
+                   type="password"
+                   @bind="_settingsNewPassword"
+                   @bind:event="oninput"
+                   placeholder="Nuova password"
+                   disabled="@(!_settingsProtectWithPassword || _isBusy)" />
+        </div>
+
+        <div class="row">
+            <label for="settingsConfirmPassword">Conferma password</label>
+            <input id="settingsConfirmPassword"
+                   type="password"
+                   @bind="_settingsConfirmPassword"
+                   @bind:event="oninput"
+                   placeholder="Conferma password"
+                   disabled="@(!_settingsProtectWithPassword || _isBusy)" />
+        </div>
+
+        <div class="row buttons">
+            <button class="secondary" @onclick="ApplyVaultSettingsAsync" disabled="@_isBusy">Applica impostazioni</button>
+        </div>
+    </section>
+
     <section class="panel">
         <div class="toolbar">
             <button class="secondary"
@@ -205,6 +312,11 @@
 
     private IBrowserFile? _selectedVaultFile;
     private string _selectedVaultFileName = string.Empty;
+    private string _createVaultName = "vault_web.vault";
+    private bool _createProtectWithPassword = true;
+    private string _createPassword = string.Empty;
+    private string _createConfirmPassword = string.Empty;
+    private string _createStorageFormat = "extended";
     private string _password = string.Empty;
     private string _statusMessage = string.Empty;
     private bool _hasError;
@@ -214,6 +326,10 @@
     private string _currentFolderPath = string.Empty;
     private IReadOnlyList<VaultFileItem> _currentItems = Array.Empty<VaultFileItem>();
     private string _openedVaultFileName = "vault.vault";
+    private bool _settingsProtectWithPassword = true;
+    private string _settingsNewPassword = string.Empty;
+    private string _settingsConfirmPassword = string.Empty;
+    private string _settingsStorageFormat = "extended";
     private readonly HashSet<Guid> _selectedItemIds = new();
     private readonly HashSet<Guid> _dragItemIds = new();
     private string _dragOverFolderPath = string.Empty;
@@ -265,17 +381,80 @@
         await InvokeAsync(StateHasChanged);
     }
 
+    private async Task CreateVaultAsync()
+    {
+        bool passwordProtected = _createProtectWithPassword;
+        if (passwordProtected && string.IsNullOrWhiteSpace(_createPassword))
+        {
+            SetError("Inserisci una password per il nuovo vault.");
+            return;
+        }
+
+        if (passwordProtected && !string.Equals(_createPassword, _createConfirmPassword, StringComparison.Ordinal))
+        {
+            SetError("Le password non coincidono.");
+            return;
+        }
+
+        string fileName = NormalizeVaultFileName(_createVaultName);
+        VaultStorageFormat storageFormat = ParseStorageFormat(_createStorageFormat);
+        _isBusy = true;
+        _statusMessage = "Creazione vault in corso...";
+        _hasError = false;
+        var createProgress = StartProgress("Creazione vault...");
+
+        try
+        {
+            (VaultPortableReader reader, byte[] vaultBytes) created = await Task.Run(() =>
+            {
+                VaultPortableReader reader = VaultPortableReader.CreateNew(
+                    storageFormat,
+                    passwordProtected ? _createPassword : string.Empty,
+                    passwordProtected);
+
+                byte[] vaultBytes = reader.ExportVaultBytes(createProgress);
+                return (reader, vaultBytes);
+            });
+
+            _reader?.Dispose();
+            _reader = created.reader;
+            _currentFolderPath = string.Empty;
+            _openedVaultFileName = fileName;
+            ClearSelection();
+            CancelMoveDialog();
+            ResetDragState();
+            RefreshCurrentItems();
+            SyncSettingsFromReader();
+
+            using var stream = new MemoryStream(created.vaultBytes);
+            using var streamRef = new DotNetStreamReference(stream);
+            await JS.InvokeVoidAsync("vaultWeb.downloadFileFromStream", fileName, streamRef);
+
+            SetSuccess($"Vault creato. Formato: {GetStorageFormatLabel(_reader.StorageFormat)}. Protezione: {GetProtectionModeLabel(_reader.ProtectionMode)}.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Creazione non riuscita: {ex.Message}");
+            _reader?.Dispose();
+            _reader = null;
+            _currentItems = Array.Empty<VaultFileItem>();
+            ClearSelection();
+        }
+        finally
+        {
+            _isBusy = false;
+            _createPassword = string.Empty;
+            _createConfirmPassword = string.Empty;
+            StopProgress();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
     private async Task OpenVaultAsync()
     {
         if (_selectedVaultFile == null)
         {
             SetError("Seleziona prima un file .vault.");
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(_password))
-        {
-            SetError("Inserisci la password.");
             return;
         }
 
@@ -290,11 +469,22 @@
             using var buffered = new MemoryStream();
             await input.CopyToAsync(buffered);
             buffered.Position = 0;
+            VaultFileFormat.Header header = VaultFileFormat.ReadHeader(buffered);
+            bool requiresPassword = header.RequiresPassword;
+            buffered.Position = 0;
+
+            if (requiresPassword && string.IsNullOrWhiteSpace(_password))
+            {
+                SetError("Inserisci la password.");
+                return;
+            }
+
+            buffered.Position = 0;
 
             _reader?.Dispose();
             _reader = await Task.Run(() => VaultPortableReader.Open(
                 buffered,
-                _password,
+                requiresPassword ? _password : string.Empty,
                 allowUltra: false,
                 progress: openProgress));
             _currentFolderPath = string.Empty;
@@ -302,8 +492,11 @@
                 ? "vault.vault"
                 : _selectedVaultFileName;
             ClearSelection();
+            CancelMoveDialog();
+            ResetDragState();
             RefreshCurrentItems();
-            SetSuccess($"Vault aperto. Formato: {GetStorageFormatLabel(_reader.StorageFormat)}.");
+            SyncSettingsFromReader();
+            SetSuccess($"Vault aperto. Formato: {GetStorageFormatLabel(_reader.StorageFormat)}. Protezione: {GetProtectionModeLabel(_reader.ProtectionMode)}.");
         }
         catch (OutOfMemoryException)
         {
@@ -339,9 +532,94 @@
         ClearSelection();
         CancelMoveDialog();
         ResetDragState();
+        SyncSettingsFromReader();
         StopProgress();
         _statusMessage = "Vault chiuso.";
         _hasError = false;
+    }
+
+    private async Task ApplyVaultSettingsAsync()
+    {
+        if (_reader == null)
+            return;
+
+        bool protectionChanged = _settingsProtectWithPassword != _reader.RequiresPassword;
+        bool wantsPasswordChange = _settingsProtectWithPassword &&
+            (!string.IsNullOrWhiteSpace(_settingsNewPassword) || !string.IsNullOrWhiteSpace(_settingsConfirmPassword));
+        VaultStorageFormat selectedFormat = ParseStorageFormat(_settingsStorageFormat);
+        bool formatChanged = selectedFormat != _reader.StorageFormat;
+
+        if (!protectionChanged && !wantsPasswordChange && !formatChanged)
+        {
+            SetError("Nessuna modifica selezionata.");
+            return;
+        }
+
+        if (_settingsProtectWithPassword && (protectionChanged || wantsPasswordChange))
+        {
+            if (string.IsNullOrWhiteSpace(_settingsNewPassword))
+            {
+                SetError(_reader.RequiresPassword
+                    ? "Inserisci una nuova password."
+                    : "Inserisci una password per attivare la protezione.");
+                return;
+            }
+
+            if (!string.Equals(_settingsNewPassword, _settingsConfirmPassword, StringComparison.Ordinal))
+            {
+                SetError("Le password non coincidono.");
+                return;
+            }
+        }
+
+        _isBusy = true;
+        _hasError = false;
+        var settingsProgress = StartProgress("Aggiornamento impostazioni...");
+        try
+        {
+            await Task.Run(() =>
+            {
+                double currentStart = 0;
+                int operations = (protectionChanged || wantsPasswordChange ? 1 : 0) + (formatChanged ? 1 : 0);
+                if (operations == 0)
+                    return;
+
+                double stepSize = 100d / operations;
+
+                if (protectionChanged || wantsPasswordChange)
+                {
+                    if (_settingsProtectWithPassword)
+                        _reader.ChangePassword(_settingsNewPassword);
+                    else
+                        _reader.DisablePasswordProtection();
+
+                    settingsProgress.Report(currentStart + stepSize);
+                    currentStart += stepSize;
+                }
+
+                if (formatChanged)
+                {
+                    _reader.ChangeStorageFormat(selectedFormat);
+                    settingsProgress.Report(100d);
+                }
+            });
+
+            SyncSettingsFromReader();
+            SetSuccess($"Impostazioni aggiornate. Formato: {GetStorageFormatLabel(_reader.StorageFormat)}. Protezione: {GetProtectionModeLabel(_reader.ProtectionMode)}.");
+        }
+        catch (Exception ex)
+        {
+            SyncSettingsFromReader();
+            SetError($"Aggiornamento impostazioni non riuscito: {ex.Message}");
+        }
+        finally
+        {
+            _isBusy = false;
+            _settingsNewPassword = string.Empty;
+            _settingsConfirmPassword = string.Empty;
+            StopProgress();
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private async Task GoUpFolderAsync()
@@ -892,6 +1170,71 @@
             VaultStorageFormat.Ultra => "ultra",
             _ => format.ToString().ToLowerInvariant()
         };
+
+    private static string GetProtectionModeLabel(VaultProtectionMode protectionMode) =>
+        protectionMode switch
+        {
+            VaultProtectionMode.Fast => "veloce",
+            _ => "protetta"
+        };
+
+    private void SyncSettingsFromReader()
+    {
+        if (_reader == null)
+        {
+            _settingsProtectWithPassword = true;
+            _settingsStorageFormat = "extended";
+            _settingsNewPassword = string.Empty;
+            _settingsConfirmPassword = string.Empty;
+            return;
+        }
+
+        _settingsProtectWithPassword = _reader.RequiresPassword;
+        _settingsStorageFormat = FormatToSelectionValue(_reader.StorageFormat);
+        _settingsNewPassword = string.Empty;
+        _settingsConfirmPassword = string.Empty;
+    }
+
+    private static string FormatToSelectionValue(VaultStorageFormat format) =>
+        format switch
+        {
+            VaultStorageFormat.Legacy => "legacy",
+            VaultStorageFormat.Ultra => "ultra",
+            _ => "extended"
+        };
+
+    private static VaultStorageFormat ParseStorageFormat(string? value) =>
+        value?.Trim().ToLowerInvariant() switch
+        {
+            "legacy" => VaultStorageFormat.Legacy,
+            "ultra" => VaultStorageFormat.Ultra,
+            _ => VaultStorageFormat.Extended
+        };
+
+    private static string NormalizeVaultFileName(string? requestedName)
+    {
+        string candidate = string.IsNullOrWhiteSpace(requestedName)
+            ? "vault_web"
+            : requestedName.Trim();
+
+        foreach (char invalid in Path.GetInvalidFileNameChars())
+            candidate = candidate.Replace(invalid, '_');
+
+        if (candidate.EndsWith(".vault", StringComparison.OrdinalIgnoreCase))
+            return candidate;
+
+        return $"{candidate}.vault";
+    }
+
+    private static IProgress<double> CreateScaledProgress(IProgress<double> progress, double start, double end)
+    {
+        return new Progress<double>(value =>
+        {
+            double clamped = Math.Max(0, Math.Min(100, value));
+            double scaled = start + ((end - start) * (clamped / 100d));
+            progress.Report(scaled);
+        });
+    }
 
     private void SetSuccess(string message)
     {

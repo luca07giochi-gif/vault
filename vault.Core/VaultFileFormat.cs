@@ -17,6 +17,9 @@ namespace vault.Core
         public const byte LEGACY_VERSION_WITH_ID = 4;
         public const byte STREAMING_VERSION_WITH_ID = 5;
         public const byte ULTRA_STREAMING_VERSION_WITH_ID = 6;
+        public const byte FAST_LEGACY_VERSION_WITH_ID = 7;
+        public const byte FAST_STREAMING_VERSION_WITH_ID = 8;
+        public const byte FAST_ULTRA_STREAMING_VERSION_WITH_ID = 9;
         public const byte VERSION = ULTRA_STREAMING_VERSION_WITH_ID;
 
         public const int SALT_SIZE = 16;
@@ -40,6 +43,8 @@ namespace vault.Core
             public int Size { get; }
             public bool HasVaultId => VaultIdBytes != null && VaultIdBytes.Length == VAULT_ID_SIZE;
             public string? VaultId => HasVaultId ? FormatVaultId(VaultIdBytes!) : null;
+            public VaultProtectionKind ProtectionKind => GetProtectionKind(Version);
+            public bool RequiresPassword => ProtectionKind == VaultProtectionKind.Password;
 
             public Header(byte[] magic, byte version, byte[] salt, byte[] nonce, byte[]? vaultIdBytes = null)
             {
@@ -145,7 +150,10 @@ namespace vault.Core
         public static bool HasVaultId(byte version) =>
             version == LEGACY_VERSION_WITH_ID ||
             version == STREAMING_VERSION_WITH_ID ||
-            version == ULTRA_STREAMING_VERSION_WITH_ID;
+            version == ULTRA_STREAMING_VERSION_WITH_ID ||
+            version == FAST_LEGACY_VERSION_WITH_ID ||
+            version == FAST_STREAMING_VERSION_WITH_ID ||
+            version == FAST_ULTRA_STREAMING_VERSION_WITH_ID;
 
         public static int GetHeaderSize(byte version) =>
             HasVaultId(version) ? HEADER_SIZE_WITH_ID : HEADER_SIZE_LEGACY;
@@ -154,7 +162,17 @@ namespace vault.Core
         {
             LEGACY_VERSION or LEGACY_VERSION_WITH_ID => VaultStorageKind.Legacy,
             ULTRA_STREAMING_VERSION or ULTRA_STREAMING_VERSION_WITH_ID => VaultStorageKind.Ultra,
+            FAST_LEGACY_VERSION_WITH_ID => VaultStorageKind.Legacy,
+            FAST_ULTRA_STREAMING_VERSION_WITH_ID => VaultStorageKind.Ultra,
+            FAST_STREAMING_VERSION_WITH_ID => VaultStorageKind.Extended,
             STREAMING_VERSION or STREAMING_VERSION_WITH_ID => VaultStorageKind.Extended,
+            _ => throw new InvalidDataException(VaultText.T("core.format.versionUnsupported"))
+        };
+
+        public static VaultProtectionKind GetProtectionKind(byte version) => version switch
+        {
+            FAST_LEGACY_VERSION_WITH_ID or FAST_STREAMING_VERSION_WITH_ID or FAST_ULTRA_STREAMING_VERSION_WITH_ID => VaultProtectionKind.Fast,
+            LEGACY_VERSION or STREAMING_VERSION or ULTRA_STREAMING_VERSION or LEGACY_VERSION_WITH_ID or STREAMING_VERSION_WITH_ID or ULTRA_STREAMING_VERSION_WITH_ID => VaultProtectionKind.Password,
             _ => throw new InvalidDataException(VaultText.T("core.format.versionUnsupported"))
         };
 
@@ -165,6 +183,18 @@ namespace vault.Core
             VaultStorageKind.Ultra => ULTRA_STREAMING_VERSION_WITH_ID,
             _ => throw new InvalidDataException(VaultText.T("core.format.versionUnsupported"))
         };
+
+        public static byte GetVersionWithVaultId(VaultStorageKind storageKind, VaultProtectionKind protectionKind) =>
+            (storageKind, protectionKind) switch
+            {
+                (VaultStorageKind.Legacy, VaultProtectionKind.Password) => LEGACY_VERSION_WITH_ID,
+                (VaultStorageKind.Extended, VaultProtectionKind.Password) => STREAMING_VERSION_WITH_ID,
+                (VaultStorageKind.Ultra, VaultProtectionKind.Password) => ULTRA_STREAMING_VERSION_WITH_ID,
+                (VaultStorageKind.Legacy, VaultProtectionKind.Fast) => FAST_LEGACY_VERSION_WITH_ID,
+                (VaultStorageKind.Extended, VaultProtectionKind.Fast) => FAST_STREAMING_VERSION_WITH_ID,
+                (VaultStorageKind.Ultra, VaultProtectionKind.Fast) => FAST_ULTRA_STREAMING_VERSION_WITH_ID,
+                _ => throw new InvalidDataException(VaultText.T("core.format.versionUnsupported"))
+            };
 
         // ---------- LEGACY PAYLOAD (v1) ----------
         public static byte[] ReadEncryptedPayload(string filePath)
@@ -297,7 +327,10 @@ namespace vault.Core
                 version != ULTRA_STREAMING_VERSION &&
                 version != LEGACY_VERSION_WITH_ID &&
                 version != STREAMING_VERSION_WITH_ID &&
-                version != ULTRA_STREAMING_VERSION_WITH_ID)
+                version != ULTRA_STREAMING_VERSION_WITH_ID &&
+                version != FAST_LEGACY_VERSION_WITH_ID &&
+                version != FAST_STREAMING_VERSION_WITH_ID &&
+                version != FAST_ULTRA_STREAMING_VERSION_WITH_ID)
             {
                 throw new InvalidDataException(VaultText.T("core.format.versionUnsupported"));
             }
@@ -318,6 +351,12 @@ namespace vault.Core
             Legacy,
             Extended,
             Ultra
+        }
+
+        public enum VaultProtectionKind
+        {
+            Password,
+            Fast
         }
 
         private static byte[] DeriveChunkNonce(byte[] baseNonce, int chunkIndex)
