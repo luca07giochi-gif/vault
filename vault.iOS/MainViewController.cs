@@ -1633,22 +1633,23 @@ namespace vault.iOS
             bool initialValue,
             string labelText)
         {
-            const nfloat top = 72f;
-            const nfloat left = 18f;
-            const nfloat right = 18f;
+            nfloat top = 72f;
+            nfloat left = 18f;
+            nfloat right = 18f;
+            UIView alertView = alert.View ?? throw new InvalidOperationException("Alert view non disponibile.");
 
             var label = new UILabel(new CGRect(left, top, 180f, 24f))
             {
                 Text = labelText,
                 Font = UIFont.SystemFontOfSize(14f),
-                TextColor = UIColor.LabelColor,
+                TextColor = UIColor.Black,
                 Lines = 1
             };
 
             var toggle = new UISwitch();
             toggle.On = initialValue;
-            nfloat toggleX = alert.View.Bounds.Width > 0
-                ? alert.View.Bounds.Width - toggle.Frame.Width - right
+            nfloat toggleX = alertView.Bounds.Width > 0
+                ? alertView.Bounds.Width - toggle.Frame.Width - right
                 : 208f;
             toggle.Frame = new CGRect(
                 toggleX,
@@ -1656,8 +1657,8 @@ namespace vault.iOS
                 toggle.Frame.Width,
                 toggle.Frame.Height);
 
-            alert.View.AddSubview(label);
-            alert.View.AddSubview(toggle);
+            alertView.AddSubview(label);
+            alertView.AddSubview(toggle);
             return toggle;
         }
 
