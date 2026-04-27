@@ -2,6 +2,7 @@
 @implements IDisposable
 @using vault.Core
 @using vault.Core.Domain
+@using System.IO.Compression
 @inject IJSRuntime JS
 
 <h1>Apri Vault</h1>
@@ -186,6 +187,11 @@
                     @onclick="SaveVaultAsync"
                     disabled="@(!_reader.IsDirty || _isBusy)">
                 Salva vault aggiornato
+            </button>
+            <button class="secondary"
+                    @onclick="DownloadSelectedItemsAsync"
+                    disabled="@(!HasSelectedItems || _isBusy)">
+                Scarica selezionati
             </button>
             <button class="secondary"
                     @onclick="MoveSelectedItemsAsync"
@@ -774,7 +780,7 @@
         }
     }
 
-    private async Task DownloadFileAsync(VaultFileItem file)
+    private async Task DownloadFileAsync(VaultFileItem file, bool showSuccessMessage = false)
     {
         if (_reader == null || file == null || file.IsFolder)
             return;
@@ -785,11 +791,166 @@
             using var stream = new MemoryStream(content);
             using var streamRef = new DotNetStreamReference(stream);
             await JS.InvokeVoidAsync("vaultWeb.downloadFileFromStream", file.FileName, streamRef);
+
+            if (showSuccessMessage)
+                SetSuccess("Elemento scaricato.");
         }
         catch (Exception ex)
         {
             SetError($"Download non riuscito: {ex.Message}");
         }
+    }
+
+    private async Task DownloadSelectedItemsAsync()
+    {
+        if (_reader == null || _selectedItemIds.Count == 0)
+            return;
+
+        List<VaultFileItem> selectedItems = _currentItems
+            .Where(item => _selectedItemIds.Contains(item.Id))
+            .ToList();
+
+        if (selectedItems.Count == 0)
+        {
+            SetError("Seleziona almeno un elemento valido.");
+            return;
+        }
+
+        if (selectedItems.Count == 1 && !selectedItems[0].IsFolder)
+        {
+            await DownloadFileAsync(selectedItems[0], showSuccessMessage: true);
+            return;
+        }
+
+        VaultPortableReader reader = _reader;
+        _isBusy = true;
+        var downloadProgress = StartProgress($"Preparazione archivio ZIP ({selectedItems.Count} elementi)...");
+
+        try
+        {
+            string archiveName = BuildSelectedItemsArchiveName();
+            (string downloadedArchiveName, byte[] archiveBytes) = await Task.Run(() =>
+                CreateSelectedItemsArchive(reader, selectedItems, archiveName, downloadProgress));
+
+            using var stream = new MemoryStream(archiveBytes);
+            using var streamRef = new DotNetStreamReference(stream);
+            await JS.InvokeVoidAsync("vaultWeb.downloadFileFromStream", downloadedArchiveName, streamRef);
+
+            SetSuccess($"Scaricati {selectedItems.Count} elementi in archivio ZIP.");
+        }
+        catch (Exception ex)
+        {
+            SetError($"Download selezionati non riuscito: {ex.Message}");
+        }
+        finally
+        {
+            _isBusy = false;
+            StopProgress();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static (string archiveName, byte[] archiveBytes) CreateSelectedItemsArchive(
+        VaultPortableReader reader,
+        IReadOnlyList<VaultFileItem> selectedItems,
+        string archiveName,
+        IProgress<double> progress)
+    {
+        using var archiveStream = new MemoryStream();
+        using (var zip = new ZipArchive(archiveStream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            int totalEntries = CountDownloadableEntries(reader, selectedItems);
+            int processedEntries = 0;
+
+            foreach (var item in selectedItems)
+                AddItemToArchive(zip, reader, item, progress, ref processedEntries, totalEntries);
+        }
+
+        progress.Report(100d);
+        return (archiveName, archiveStream.ToArray());
+    }
+
+    private static int CountDownloadableEntries(VaultPortableReader reader, IEnumerable<VaultFileItem> items)
+    {
+        int count = 0;
+
+        foreach (var item in items)
+            count += CountDownloadableEntries(reader, item);
+
+        return count;
+    }
+
+    private static int CountDownloadableEntries(VaultPortableReader reader, VaultFileItem item)
+    {
+        if (!item.IsFolder)
+            return 1;
+
+        int count = 1;
+        foreach (var child in reader.GetItemsInFolder(item.FullPath))
+            count += CountDownloadableEntries(reader, child);
+
+        return count;
+    }
+
+    private static void AddItemToArchive(
+        ZipArchive zip,
+        VaultPortableReader reader,
+        VaultFileItem item,
+        IProgress<double> progress,
+        ref int processedEntries,
+        int totalEntries)
+    {
+        if (item.IsFolder)
+        {
+            string folderEntryName = NormalizeArchiveEntryPath(item.FullPath);
+            if (!string.IsNullOrWhiteSpace(folderEntryName))
+            {
+                zip.CreateEntry(folderEntryName.TrimEnd('/') + "/");
+                processedEntries++;
+                ReportDownloadProgress(progress, processedEntries, totalEntries);
+            }
+
+            foreach (var child in reader.GetItemsInFolder(item.FullPath))
+                AddItemToArchive(zip, reader, child, progress, ref processedEntries, totalEntries);
+
+            return;
+        }
+
+        string entryName = NormalizeArchiveEntryPath(string.IsNullOrWhiteSpace(item.FullPath) ? item.FileName : item.FullPath);
+        ZipArchiveEntry entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
+        using Stream entryStream = entry.Open();
+        byte[] content = reader.ReadFileContent(item.Id);
+        entryStream.Write(content, 0, content.Length);
+
+        processedEntries++;
+        ReportDownloadProgress(progress, processedEntries, totalEntries);
+    }
+
+    private static void ReportDownloadProgress(IProgress<double> progress, int processedEntries, int totalEntries)
+    {
+        if (totalEntries <= 0)
+            return;
+
+        progress.Report(Math.Min(100d, processedEntries * 100d / totalEntries));
+    }
+
+    private string BuildSelectedItemsArchiveName()
+    {
+        string baseName = Path.GetFileNameWithoutExtension(
+            string.IsNullOrWhiteSpace(_openedVaultFileName) ? "vault" : _openedVaultFileName);
+
+        if (string.IsNullOrWhiteSpace(baseName))
+            baseName = "vault";
+
+        return $"{baseName}_selected.zip";
+    }
+
+    private static string NormalizeArchiveEntryPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return string.Empty;
+
+        return path.Trim().Replace('\\', '/').TrimStart('/');
     }
 
     private bool CanPreviewInBrowser(VaultFileItem item)
