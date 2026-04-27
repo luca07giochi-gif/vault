@@ -1642,7 +1642,7 @@ namespace vault.iOS
             {
                 Text = labelText,
                 Font = UIFont.SystemFontOfSize(14f),
-                TextColor = UIColor.Black,
+                TextColor = UIColor.LabelColor,
                 Lines = 1
             };
 
@@ -2677,7 +2677,7 @@ namespace vault.iOS
         {
             UIAlertController sheet = UIAlertController.Create(
                 "Nuovo vault",
-                "Scegli formato e impostazioni di protezione",
+                "Scegli formato e modalità di protezione",
                 UIAlertControllerStyle.ActionSheet);
 
             VaultStorageFormat[] formats =
@@ -2692,7 +2692,7 @@ namespace vault.iOS
                 sheet.AddAction(UIAlertAction.Create(
                     $"Formato {GetStorageFormatLabel(format)}",
                     UIAlertActionStyle.Default,
-                    __ => PromptCreateVaultDetails(format)));
+                    __ => PromptCreateVaultProtectionModeMenu(format)));
             }
 
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
@@ -2700,17 +2700,38 @@ namespace vault.iOS
             PresentViewController(sheet, true, null);
         }
 
-        private void PromptCreateVaultDetails(VaultStorageFormat format)
+        private void PromptCreateVaultProtectionModeMenu(VaultStorageFormat format)
         {
+            UIAlertController sheet = UIAlertController.Create(
+                "Modalità di protezione",
+                "Seleziona se il nuovo vault deve avere una password.",
+                UIAlertControllerStyle.ActionSheet);
+
+            sheet.AddAction(UIAlertAction.Create("Proteggi con password", UIAlertActionStyle.Default, __ =>
+            {
+                PromptCreateVaultDetails(format, passwordProtected: true);
+            }));
+
+            sheet.AddAction(UIAlertAction.Create("Modalità veloce", UIAlertActionStyle.Default, __ =>
+            {
+                PromptCreateVaultDetails(format, passwordProtected: false);
+            }));
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private void PromptCreateVaultDetails(VaultStorageFormat format, bool passwordProtected)
+        {
+            string protectionLabel = passwordProtected
+                ? "Protezione: attiva"
+                : "Protezione: veloce";
+
             UIAlertController alert = UIAlertController.Create(
                 "Crea vault",
-                $"Formato: {GetStorageFormatLabel(format)}\n\n\n",
+                $"Formato: {GetStorageFormatLabel(format)}\n{protectionLabel}",
                 UIAlertControllerStyle.Alert);
-
-            UISwitch protectionSwitch = AddProtectionSwitchToAlert(
-                alert,
-                initialValue: true,
-                labelText: "Proteggi con password");
 
             alert.AddTextField(field =>
             {
@@ -2722,30 +2743,37 @@ namespace vault.iOS
                 field.AutocapitalizationType = UITextAutocapitalizationType.None;
                 field.TextContentType = UITextContentType.OneTimeCode;
             });
-            alert.AddTextField(field =>
+
+            if (passwordProtected)
             {
-                field.Placeholder = "Password";
-                field.SecureTextEntry = true;
-                field.AutocorrectionType = UITextAutocorrectionType.No;
-                field.SpellCheckingType = UITextSpellCheckingType.No;
-                field.TextContentType = UITextContentType.OneTimeCode;
-            });
-            alert.AddTextField(field =>
-            {
-                field.Placeholder = "Conferma password";
-                field.SecureTextEntry = true;
-                field.AutocorrectionType = UITextAutocorrectionType.No;
-                field.SpellCheckingType = UITextSpellCheckingType.No;
-                field.TextContentType = UITextContentType.OneTimeCode;
-            });
+                alert.AddTextField(field =>
+                {
+                    field.Placeholder = "Password";
+                    field.SecureTextEntry = true;
+                    field.AutocorrectionType = UITextAutocorrectionType.No;
+                    field.SpellCheckingType = UITextSpellCheckingType.No;
+                    field.TextContentType = UITextContentType.OneTimeCode;
+                });
+                alert.AddTextField(field =>
+                {
+                    field.Placeholder = "Conferma password";
+                    field.SecureTextEntry = true;
+                    field.AutocorrectionType = UITextAutocorrectionType.No;
+                    field.SpellCheckingType = UITextSpellCheckingType.No;
+                    field.TextContentType = UITextContentType.OneTimeCode;
+                });
+            }
 
             alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             alert.AddAction(UIAlertAction.Create("Crea", UIAlertActionStyle.Default, __ =>
             {
                 string requestedName = alert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
-                string password = alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
-                string confirm = alert.TextFields?.ElementAtOrDefault(2)?.Text ?? string.Empty;
-                bool passwordProtected = protectionSwitch.On;
+                string password = passwordProtected
+                    ? (alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty)
+                    : string.Empty;
+                string confirm = passwordProtected
+                    ? (alert.TextFields?.ElementAtOrDefault(2)?.Text ?? string.Empty)
+                    : string.Empty;
 
                 if (passwordProtected && string.IsNullOrWhiteSpace(password))
                 {
