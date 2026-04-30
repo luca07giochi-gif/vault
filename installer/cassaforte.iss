@@ -36,8 +36,8 @@ Name: "desktopicon"; Description: "Crea icona sul desktop"; GroupDescription: "I
 Source: "{#BuildRoot}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Registry]
 Root: HKCR; Subkey: ".vault"; ValueType: string; ValueData: "Cassaforte.vault"; Flags: uninsdeletevalue
@@ -45,12 +45,12 @@ Root: HKCR; Subkey: "Cassaforte.vault"; ValueType: string; ValueData: "Cassafort
 Root: HKCR; Subkey: "Cassaforte.vault\shell"; ValueType: string; ValueData: "open"
 Root: HKCR; Subkey: "Cassaforte.vault\shell\open"; ValueType: string; ValueData: "Apri con Cassaforte"
 Root: HKCR; Subkey: "Cassaforte.vault\DefaultIcon"; ValueType: string; ValueData: """{app}\{#AppExeName}"",0"
-Root: HKCR; Subkey: "Cassaforte.vault\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExeName}"" ""%1"""
+Root: HKCR; Subkey: "Cassaforte.vault\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExeName}"" --vault ""%1"""
 Root: HKCR; Subkey: "Applications\{#AppExeName}\SupportedTypes"; ValueName: ".vault"; ValueType: string; ValueData: ""
-Root: HKCR; Subkey: "Applications\{#AppExeName}\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExeName}"" ""%1"""
+Root: HKCR; Subkey: "Applications\{#AppExeName}\shell\open\command"; ValueType: string; ValueData: """{app}\{#AppExeName}"" --vault ""%1"""
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "Avvia {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "Avvia {#AppName}"; WorkingDir: "{app}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 
 

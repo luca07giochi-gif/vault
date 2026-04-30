@@ -56,6 +56,13 @@ namespace vault.iOS
             Compact
         }
 
+        private enum ItemSortMode
+        {
+            NameAscending,
+            NameDescending,
+            LatestAdded
+        }
+
         private enum PendingChangesDecision
         {
             Cancel,
@@ -79,6 +86,7 @@ namespace vault.iOS
         private bool _isSelectionMode;
         private BrowserViewMode _viewMode = BrowserViewMode.List;
         private PreviewPerformanceMode _previewPerformanceMode = PreviewPerformanceMode.Fast;
+        private ItemSortMode _itemSortMode = ItemSortMode.NameAscending;
         private int _thumbnailRequestVersion;
         private int _thumbnailTargetPixelSize = ThumbnailDefaultPixelSize;
         private int _thumbnailMemoryCacheLimit = ThumbnailCacheLimit;
@@ -1218,6 +1226,10 @@ namespace vault.iOS
             {
                 sheet.AddAction(UIAlertAction.Create("Struttura cartelle", UIAlertActionStyle.Default, __ => OpenFolderTreePage()));
                 sheet.AddAction(UIAlertAction.Create(
+                    $"Ordina file: {GetItemSortModeLabel(_itemSortMode)}",
+                    UIAlertActionStyle.Default,
+                    __ => OpenSortMenu()));
+                sheet.AddAction(UIAlertAction.Create(
                     $"Anteprime: {GetPreviewPerformanceLabel(_previewPerformanceMode)}",
                     UIAlertActionStyle.Default,
                     __ => OpenPreviewPerformanceMenu()));
@@ -1265,6 +1277,34 @@ namespace vault.iOS
             ConfigurePopover(sheet);
             PresentViewController(sheet, true, null);
         }
+
+        private void OpenSortMenu()
+        {
+            UIAlertController sheet = UIAlertController.Create("Ordina file", null, UIAlertControllerStyle.ActionSheet);
+            sheet.AddAction(UIAlertAction.Create("Nome A-Z", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameAscending)));
+            sheet.AddAction(UIAlertAction.Create("Nome Z-A", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameDescending)));
+            sheet.AddAction(UIAlertAction.Create("Ultima aggiunta", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.LatestAdded)));
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private void ApplyItemSortMode(ItemSortMode mode)
+        {
+            if (_itemSortMode == mode)
+                return;
+
+            _itemSortMode = mode;
+            ReloadFolderItems();
+        }
+
+        private static string GetItemSortModeLabel(ItemSortMode mode) =>
+            mode switch
+            {
+                ItemSortMode.NameDescending => "Nome Z-A",
+                ItemSortMode.LatestAdded => "Ultima aggiunta",
+                _ => "Nome A-Z"
+            };
 
         private void EnableManualSaveMode()
         {
@@ -1932,9 +1972,7 @@ namespace vault.iOS
                     string.Equals(_sharedQueueRootPath, rootPath, StringComparison.OrdinalIgnoreCase))
                     return _sharedQueueStore;
 
-                _sharedQueueStore = new SharedVaultQueueStore(rootPath);
-                _sharedQueueRootPath = rootPath;
-                return _sharedQueueStore;
+                return CacheSharedQueueStore(rootPath);
             }
             catch (Exception ex)
             {
@@ -1981,12 +2019,119 @@ namespace vault.iOS
                 return null;
 
             string currentVaultId = _session.VaultId;
-            string currentVaultPath = _vaultUrl.Path ?? string.Empty;
+            string currentVaultPath = VaultPendingImportLocator.NormalizePath(_vaultUrl.Path);
 
             return ShareVaultRegistryBridge.LoadPublishedVaultsMergedWithLocalVaults()
                 .FirstOrDefault(vault =>
                     string.Equals(vault.VaultId, currentVaultId, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(vault.LastKnownPath, currentVaultPath, StringComparison.OrdinalIgnoreCase));
+                    string.Equals(VaultPendingImportLocator.NormalizePath(vault.LastKnownPath), currentVaultPath, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private SharedVaultQueueStore CacheSharedQueueStore(string rootPath)
+        {
+            _sharedQueueRootPath = rootPath;
+            _sharedQueueStore = new SharedVaultQueueStore(rootPath);
+            return _sharedQueueStore;
+        }
+
+        private string GetCurrentVaultQueueId()
+        {
+            if (!string.IsNullOrWhiteSpace(_currentVaultRecentId))
+                return _currentVaultRecentId;
+
+            return _session?.VaultId ?? string.Empty;
+        }
+
+        private SharedVaultQueueStore? TryResolveQueueStoreForCurrentVault(
+            string currentVaultId,
+            IEnumerable<string>? preferredJobIds,
+            bool showErrorIfUnavailable)
+        {
+            if (string.IsNullOrWhiteSpace(currentVaultId))
+                return null;
+
+            SharedVaultQueueStore? currentStore = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: false);
+            if (StoreMatchesCurrentVault(currentStore, currentVaultId, preferredJobIds))
+                return currentStore;
+
+            foreach (string rootPath in EnumerateCandidateQueueRootPathsForCurrentVault())
+            {
+                if (string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
+                    continue;
+
+                SharedVaultQueueStore store;
+                try
+                {
+                    store = new SharedVaultQueueStore(rootPath);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (!StoreMatchesCurrentVault(store, currentVaultId, preferredJobIds))
+                    continue;
+
+                return CacheSharedQueueStore(rootPath);
+            }
+
+            return showErrorIfUnavailable ? TryGetCurrentVaultQueueStore(showErrorIfUnavailable: true) : null;
+        }
+
+        private IEnumerable<string> EnumerateCandidateQueueRootPathsForCurrentVault()
+        {
+            HashSet<string> emitted = new(StringComparer.OrdinalIgnoreCase);
+
+            if (!string.IsNullOrWhiteSpace(_sharedQueueRootPath))
+            {
+                string normalizedCurrent = VaultPendingImportLocator.NormalizePath(_sharedQueueRootPath);
+                if (!string.IsNullOrWhiteSpace(normalizedCurrent) && emitted.Add(normalizedCurrent))
+                    yield return normalizedCurrent;
+            }
+
+            RecentVaultRecord? currentRecord = FindExistingCurrentVaultRecord();
+            if (!string.IsNullOrWhiteSpace(currentRecord?.ImportFolderPath))
+            {
+                string normalizedRecordPath = VaultPendingImportLocator.NormalizePath(currentRecord.ImportFolderPath);
+                if (!string.IsNullOrWhiteSpace(normalizedRecordPath) && emitted.Add(normalizedRecordPath))
+                    yield return normalizedRecordPath;
+            }
+
+            if (_session != null && _vaultUrl != null)
+            {
+                string currentVaultId = _session.VaultId;
+                string currentVaultPath = VaultPendingImportLocator.NormalizePath(_vaultUrl.Path);
+
+                foreach (RecentVaultRecord record in ShareVaultRegistryBridge.LoadPublishedVaultsMergedWithLocalVaults())
+                {
+                    bool matchesVault = string.Equals(record.VaultId, currentVaultId, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(VaultPendingImportLocator.NormalizePath(record.LastKnownPath), currentVaultPath, StringComparison.OrdinalIgnoreCase);
+                    if (!matchesVault || string.IsNullOrWhiteSpace(record.ImportFolderPath))
+                        continue;
+
+                    string normalizedRecordPath = VaultPendingImportLocator.NormalizePath(record.ImportFolderPath);
+                    if (!string.IsNullOrWhiteSpace(normalizedRecordPath) && emitted.Add(normalizedRecordPath))
+                        yield return normalizedRecordPath;
+                }
+            }
+        }
+
+        private static bool StoreMatchesCurrentVault(
+            SharedVaultQueueStore? store,
+            string currentVaultId,
+            IEnumerable<string>? preferredJobIds)
+        {
+            if (store == null || string.IsNullOrWhiteSpace(currentVaultId))
+                return false;
+
+            if (preferredJobIds != null)
+            {
+                return store.LoadPendingJobs(preferredJobIds)
+                    .Any(job => string.Equals(job.VaultId, currentVaultId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            PendingImportAggregate? aggregate = store.GetPendingAggregateForVault(currentVaultId);
+            return aggregate != null && aggregate.FileCount > 0;
         }
 
         private static string ResolvePendingImportRootPath(
@@ -2137,11 +2282,17 @@ namespace vault.iOS
 
         private void PromptPendingImportsForCurrentVaultIfNeeded()
         {
-            if (_session == null || _vaultUrl == null || string.IsNullOrWhiteSpace(_currentVaultRecentId) || _pendingImportPromptVisible)
+            if (_session == null || _vaultUrl == null || _pendingImportPromptVisible)
                 return;
 
-            string currentVaultRecentId = _currentVaultRecentId;
-            SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: false);
+            string currentVaultRecentId = GetCurrentVaultQueueId();
+            if (string.IsNullOrWhiteSpace(currentVaultRecentId))
+                return;
+
+            SharedVaultQueueStore? store = TryResolveQueueStoreForCurrentVault(
+                currentVaultRecentId,
+                preferredJobIds: null,
+                showErrorIfUnavailable: false);
             if (store == null)
                 return;
 
@@ -2196,7 +2347,11 @@ namespace vault.iOS
             if (jobIds == null || jobIds.Length == 0)
                 return;
 
-            SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: true);
+            string currentVaultRecentId = GetCurrentVaultQueueId();
+            SharedVaultQueueStore? store = TryResolveQueueStoreForCurrentVault(
+                currentVaultRecentId,
+                preferredJobIds: jobIds,
+                showErrorIfUnavailable: true);
             if (store == null)
                 return;
 
@@ -2223,14 +2378,17 @@ namespace vault.iOS
         {
             if (_session == null || jobIds == null || jobIds.Length == 0)
                 return;
-            if (string.IsNullOrWhiteSpace(_currentVaultRecentId))
+
+            string currentVaultRecentId = GetCurrentVaultQueueId();
+            if (string.IsNullOrWhiteSpace(currentVaultRecentId))
                 return;
 
-            SharedVaultQueueStore? store = TryGetCurrentVaultQueueStore(showErrorIfUnavailable: true);
+            SharedVaultQueueStore? store = TryResolveQueueStoreForCurrentVault(
+                currentVaultRecentId,
+                preferredJobIds: jobIds,
+                showErrorIfUnavailable: true);
             if (store == null)
                 return;
-
-            string currentVaultRecentId = _currentVaultRecentId;
             IReadOnlyList<PendingImportJob> jobs = store.LoadPendingJobs(jobIds)
                 .Where(job =>
                     job.Status == PendingImportStatus.Pending &&
@@ -3277,9 +3435,20 @@ namespace vault.iOS
                 foreach (PHPickerResult result in results)
                 {
                     string tempPath = await ExtractPickerResultToTempPathAsync(result);
+                    string importFileName = ResolvePickerResultFileName(result, tempPath);
                     try
                     {
-                        await Task.Run(() => session.AddFileFromPath(tempPath, _currentFolder));
+                        await Task.Run(() =>
+                        {
+                            using var stream = new FileStream(
+                                tempPath,
+                                FileMode.Open,
+                                FileAccess.Read,
+                                FileShare.Read,
+                                VaultPersistCopyBufferSize,
+                                FileOptions.SequentialScan);
+                            session.AddFileFromStream(importFileName, stream, stream.Length, _currentFolder);
+                        });
                     }
                     finally
                     {
@@ -3304,6 +3473,7 @@ namespace vault.iOS
             if (_session != null)
             {
                 _visibleItems.AddRange(_session.GetItemsInFolder(_currentFolder));
+                SortVisibleItems();
             }
 
             HashSet<Guid> visibleIds = _visibleItems.Select(item => item.Id).ToHashSet();
@@ -3323,6 +3493,32 @@ namespace vault.iOS
 
             ReloadVisibleData();
             UpdateUiState();
+        }
+
+        private void SortVisibleItems()
+        {
+            if (_visibleItems.Count <= 1)
+                return;
+
+            IEnumerable<VaultFileItem> ordered = _itemSortMode switch
+            {
+                ItemSortMode.NameDescending => _visibleItems
+                    .OrderBy(item => item.IsFolder ? 0 : 1)
+                    .ThenByDescending(item => item.FileName, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(item => item.AddedTicks),
+                ItemSortMode.LatestAdded => _visibleItems
+                    .OrderBy(item => item.IsFolder ? 0 : 1)
+                    .ThenByDescending(item => item.AddedTicks)
+                    .ThenBy(item => item.FileName, StringComparer.OrdinalIgnoreCase),
+                _ => _visibleItems
+                    .OrderBy(item => item.IsFolder ? 0 : 1)
+                    .ThenBy(item => item.FileName, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(item => item.AddedTicks)
+            };
+
+            List<VaultFileItem> sorted = ordered.ToList();
+            _visibleItems.Clear();
+            _visibleItems.AddRange(sorted);
         }
 
         private void NavigateUp()
@@ -4401,6 +4597,46 @@ namespace vault.iOS
                 throw new InvalidOperationException("Tipo media non supportato.");
 
             return await LoadFileRepresentationToTempPathAsync(provider, typeIdentifier);
+        }
+
+        private static string ResolvePickerResultFileName(PHPickerResult result, string tempPath)
+        {
+            string extension = Path.GetExtension(tempPath ?? string.Empty);
+            string? candidate = result?.ItemProvider?.SuggestedName;
+
+            if (string.IsNullOrWhiteSpace(candidate))
+                candidate = TryGetPhotoLibraryOriginalFileName(result?.AssetIdentifier);
+
+            if (string.IsNullOrWhiteSpace(candidate))
+                candidate = Path.GetFileName(tempPath);
+
+            candidate = (candidate ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(Path.GetExtension(candidate)) && !string.IsNullOrWhiteSpace(extension))
+                candidate += extension;
+
+            return string.IsNullOrWhiteSpace(candidate) ? $"media{extension}" : candidate;
+        }
+
+        private static string? TryGetPhotoLibraryOriginalFileName(string? assetIdentifier)
+        {
+            if (string.IsNullOrWhiteSpace(assetIdentifier))
+                return null;
+
+            try
+            {
+                PHFetchResult assets = PHAsset.FetchAssetsUsingLocalIdentifiers(new[] { assetIdentifier }, null);
+                if (assets.Count <= 0)
+                    return null;
+
+                if (assets[0] is not PHAsset asset)
+                    return null;
+
+                return asset.ValueForKey(new NSString("filename"))?.ToString();
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static Task<string> LoadFileRepresentationToTempPathAsync(NSItemProvider provider, string typeIdentifier)
@@ -5866,6 +6102,7 @@ namespace vault.iOS
                 content.SecondaryText = item.IsFolder
                     ? $"Cartella - {item.AddedAtLabel}"
                     : $"{item.SizeLabel} - {item.AddedAtLabel}";
+                content.SecondaryTextProperties.Lines = 2;
                 cell.ContentConfiguration = content;
                 cell.Accessory = _owner._isSelectionMode
                     ? (_owner._selectedItemIds.Contains(item.Id) ? UITableViewCellAccessory.Checkmark : UITableViewCellAccessory.None)
@@ -5961,7 +6198,7 @@ namespace vault.iOS
 
                 _subtitleLabel.Font = UIFont.SystemFontOfSize(12);
                 _subtitleLabel.TextColor = UIColor.DarkGray;
-                _subtitleLabel.Lines = 1;
+                _subtitleLabel.Lines = 2;
 
                 _selectionBadge.Hidden = true;
                 _selectionBadge.Font = UIFont.SystemFontOfSize(13, UIFontWeight.Bold);
@@ -5994,7 +6231,7 @@ namespace vault.iOS
 
                 _iconView.Frame = new CGRect(12f, 12f, width - 24f, iconHeight);
                 _titleLabel.Frame = new CGRect(10f, _iconView.Frame.Bottom + 6f, width - 20f, 34f);
-                _subtitleLabel.Frame = new CGRect(10f, _titleLabel.Frame.Bottom, width - 20f, 16f);
+                _subtitleLabel.Frame = new CGRect(10f, _titleLabel.Frame.Bottom, width - 20f, 30f);
                 _selectionBadge.Frame = new CGRect(width - 28f, 8f, 20f, 20f);
             }
 
@@ -6016,7 +6253,9 @@ namespace vault.iOS
                 }
 
                 _titleLabel.Text = item.FileName;
-                _subtitleLabel.Text = item.IsFolder ? "Cartella" : item.SizeLabel;
+                _subtitleLabel.Text = item.IsFolder
+                    ? $"Cartella\nAggiunta: {item.AddedAtLabel}"
+                    : $"{item.SizeLabel}\nAggiunta: {item.AddedAtLabel}";
 
                 _selectionBadge.Hidden = !isSelectionMode;
                 _selectionBadge.Text = isSelected ? "OK" : string.Empty;

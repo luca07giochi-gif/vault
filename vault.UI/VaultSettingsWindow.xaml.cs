@@ -133,9 +133,18 @@ namespace vault.UI
 
         private void UpdatePasswordInputsState()
         {
+            if (ProtectWithPasswordCheckBox == null ||
+                NewPasswordBox == null ||
+                ConfirmPasswordBox == null)
+            {
+                return;
+            }
+
             bool passwordProtected = ProtectWithPassword;
-            NewPasswordLabelTextBlock.IsEnabled = passwordProtected;
-            ConfirmPasswordLabelTextBlock.IsEnabled = passwordProtected;
+            if (NewPasswordLabelTextBlock != null)
+                NewPasswordLabelTextBlock.IsEnabled = passwordProtected;
+            if (ConfirmPasswordLabelTextBlock != null)
+                ConfirmPasswordLabelTextBlock.IsEnabled = passwordProtected;
             NewPasswordBox.IsEnabled = passwordProtected;
             ConfirmPasswordBox.IsEnabled = passwordProtected;
 

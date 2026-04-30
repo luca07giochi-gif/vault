@@ -641,9 +641,20 @@ namespace vault.UI
 
         private void UpdateCreatePasswordInputsState()
         {
+            if (CreateProtectWithPasswordCheckBox == null ||
+                CreatePasswordBox == null ||
+                CreateConfirmPasswordBox == null)
+            {
+                return;
+            }
+
             bool passwordProtected = CreateProtectWithPasswordCheckBox.IsChecked != false;
             CreatePasswordBox.IsEnabled = passwordProtected;
             CreateConfirmPasswordBox.IsEnabled = passwordProtected;
+            if (CreatePasswordLabelTextBlock != null)
+                CreatePasswordLabelTextBlock.IsEnabled = passwordProtected;
+            if (CreateConfirmPasswordLabelTextBlock != null)
+                CreateConfirmPasswordLabelTextBlock.IsEnabled = passwordProtected;
 
             if (!passwordProtected)
             {
