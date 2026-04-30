@@ -6102,7 +6102,6 @@ namespace vault.iOS
                 content.SecondaryText = item.IsFolder
                     ? $"Cartella - {item.AddedAtLabel}"
                     : $"{item.SizeLabel} - {item.AddedAtLabel}";
-                content.SecondaryTextProperties.Lines = 2;
                 cell.ContentConfiguration = content;
                 cell.Accessory = _owner._isSelectionMode
                     ? (_owner._selectedItemIds.Contains(item.Id) ? UITableViewCellAccessory.Checkmark : UITableViewCellAccessory.None)
