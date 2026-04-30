@@ -1628,40 +1628,6 @@ namespace vault.iOS
             };
         }
 
-        private static UISwitch AddProtectionSwitchToAlert(
-            UIAlertController alert,
-            bool initialValue,
-            string labelText)
-        {
-            nfloat top = 72f;
-            nfloat left = 18f;
-            nfloat right = 18f;
-            UIView alertView = alert.View ?? throw new InvalidOperationException("Alert view non disponibile.");
-
-            var label = new UILabel(new CGRect(left, top, 180f, 24f))
-            {
-                Text = labelText,
-                Font = UIFont.SystemFontOfSize(14f),
-                TextColor = UIColor.LabelColor,
-                Lines = 1
-            };
-
-            var toggle = new UISwitch();
-            toggle.On = initialValue;
-            nfloat toggleX = alertView.Bounds.Width > 0
-                ? alertView.Bounds.Width - toggle.Frame.Width - right
-                : 208f;
-            toggle.Frame = new CGRect(
-                toggleX,
-                top - 3f,
-                toggle.Frame.Width,
-                toggle.Frame.Height);
-
-            alertView.AddSubview(label);
-            alertView.AddSubview(toggle);
-            return toggle;
-        }
-
         private void OpenStorageFormatMenu()
         {
             if (_session == null)
@@ -1740,54 +1706,91 @@ namespace vault.iOS
             if (_session == null)
                 return;
 
-            UIAlertController alert = UIAlertController.Create(
-                "Protezione e password",
-                "Gestisci la protezione del vault.\n\n\n",
+            if (_session.RequiresPassword)
+            {
+                UIAlertController alert = UIAlertController.Create(
+                    "Password del vault",
+                    "Inserisci la password attuale. Se lasci vuoti i campi della nuova password, il vault passera alla modalita veloce.",
+                    UIAlertControllerStyle.Alert);
+
+                alert.AddTextField(field =>
+                {
+                    field.Placeholder = "Password attuale";
+                    field.SecureTextEntry = true;
+                });
+                alert.AddTextField(field =>
+                {
+                    field.Placeholder = "Nuova password";
+                    field.SecureTextEntry = true;
+                });
+                alert.AddTextField(field =>
+                {
+                    field.Placeholder = "Conferma nuova password";
+                    field.SecureTextEntry = true;
+                });
+
+                alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+                alert.AddAction(UIAlertAction.Create("Applica", UIAlertActionStyle.Default, __ =>
+                {
+                    string currentPassword = alert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
+                    string newPassword = alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
+                    string confirmPassword = alert.TextFields?.ElementAtOrDefault(2)?.Text ?? string.Empty;
+
+                    if (!IsCurrentSessionPasswordValid(currentPassword))
+                    {
+                        ShowError("Password attuale non corretta.");
+                        return;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(newPassword) && string.IsNullOrWhiteSpace(confirmPassword))
+                    {
+                        _ = DisablePasswordProtectionAsync(currentPassword);
+                        return;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(newPassword))
+                    {
+                        ShowError("Inserisci una nuova password oppure lascia vuoti entrambi i campi.");
+                        return;
+                    }
+
+                    if (!string.Equals(newPassword, confirmPassword, StringComparison.Ordinal))
+                    {
+                        ShowError("Le password non coincidono.");
+                        return;
+                    }
+
+                    _ = ChangePasswordAsync(currentPassword, newPassword);
+                }));
+
+                PresentViewController(alert, true, null);
+                return;
+            }
+
+            UIAlertController fastAlert = UIAlertController.Create(
+                "Attiva protezione",
+                "Il vault e in modalita veloce. Inserisci una password per proteggerlo.",
                 UIAlertControllerStyle.Alert);
 
-            UISwitch protectionSwitch = AddProtectionSwitchToAlert(
-                alert,
-                initialValue: _session.RequiresPassword,
-                labelText: "Proteggi con password");
-
-            alert.AddTextField(field =>
+            fastAlert.AddTextField(field =>
             {
                 field.Placeholder = "Nuova password";
                 field.SecureTextEntry = true;
             });
-            alert.AddTextField(field =>
+            fastAlert.AddTextField(field =>
             {
-                field.Placeholder = "Conferma password";
+                field.Placeholder = "Conferma nuova password";
                 field.SecureTextEntry = true;
             });
 
-            alert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-            alert.AddAction(UIAlertAction.Create("Conferma", UIAlertActionStyle.Default, __ =>
+            fastAlert.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            fastAlert.AddAction(UIAlertAction.Create("Proteggi", UIAlertActionStyle.Default, __ =>
             {
-                bool passwordProtected = protectionSwitch.On;
-                string newPassword = alert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
-                string confirmPassword = alert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
-
-                if (!passwordProtected)
-                {
-                    if (!_session.RequiresPassword)
-                    {
-                        ShowSimpleAlert("Nessuna modifica", "Questo vault e gia in modalita veloce.");
-                        return;
-                    }
-
-                    _ = DisablePasswordProtectionAsync();
-                    return;
-                }
+                string newPassword = fastAlert.TextFields?.ElementAtOrDefault(0)?.Text ?? string.Empty;
+                string confirmPassword = fastAlert.TextFields?.ElementAtOrDefault(1)?.Text ?? string.Empty;
 
                 if (string.IsNullOrWhiteSpace(newPassword))
                 {
-                    if (_session.RequiresPassword)
-                    {
-                        ShowSimpleAlert("Nessuna modifica", "La protezione con password e gia attiva.");
-                        return;
-                    }
-
                     ShowError("Inserisci una password valida.");
                     return;
                 }
@@ -1798,19 +1801,32 @@ namespace vault.iOS
                     return;
                 }
 
-                _ = ChangePasswordAsync(newPassword);
+                _ = ChangePasswordAsync(string.Empty, newPassword);
             }));
 
-            PresentViewController(alert, true, null);
+            PresentViewController(fastAlert, true, null);
         }
 
-        private async Task ChangePasswordAsync(string newPassword)
+        private bool IsCurrentSessionPasswordValid(string password)
+        {
+            if (_session == null || !_session.RequiresPassword)
+                return true;
+
+            return string.Equals(password ?? string.Empty, _sessionPassword, StringComparison.Ordinal);
+        }
+
+        private async Task ChangePasswordAsync(string currentPassword, string newPassword)
         {
             if (_session == null)
                 return;
             if (_vaultUrl == null)
             {
                 ShowError("Non riesco a trovare il vault selezionato.");
+                return;
+            }
+            if (_session.RequiresPassword && !IsCurrentSessionPasswordValid(currentPassword))
+            {
+                ShowError("Password attuale non corretta.");
                 return;
             }
 
@@ -1837,7 +1853,7 @@ namespace vault.iOS
             });
         }
 
-        private async Task DisablePasswordProtectionAsync()
+        private async Task DisablePasswordProtectionAsync(string currentPassword)
         {
             if (_session == null)
                 return;
@@ -1849,6 +1865,11 @@ namespace vault.iOS
             if (!_session.RequiresPassword)
             {
                 ShowSimpleAlert("Nessuna modifica", "Questo vault e gia in modalita veloce.");
+                return;
+            }
+            if (!IsCurrentSessionPasswordValid(currentPassword))
+            {
+                ShowError("Password attuale non corretta.");
                 return;
             }
 
@@ -2677,7 +2698,7 @@ namespace vault.iOS
         {
             UIAlertController sheet = UIAlertController.Create(
                 "Nuovo vault",
-                "Scegli formato e modalità di protezione",
+                "Scegli formato e modalita di protezione",
                 UIAlertControllerStyle.ActionSheet);
 
             VaultStorageFormat[] formats =
@@ -2703,7 +2724,7 @@ namespace vault.iOS
         private void PromptCreateVaultProtectionModeMenu(VaultStorageFormat format)
         {
             UIAlertController sheet = UIAlertController.Create(
-                "Modalità di protezione",
+                "Modalita di protezione",
                 "Seleziona se il nuovo vault deve avere una password.",
                 UIAlertControllerStyle.ActionSheet);
 
@@ -2712,7 +2733,7 @@ namespace vault.iOS
                 PromptCreateVaultDetails(format, passwordProtected: true);
             }));
 
-            sheet.AddAction(UIAlertAction.Create("Modalità veloce", UIAlertActionStyle.Default, __ =>
+            sheet.AddAction(UIAlertAction.Create("Modalita veloce", UIAlertActionStyle.Default, __ =>
             {
                 PromptCreateVaultDetails(format, passwordProtected: false);
             }));
@@ -8342,3 +8363,4 @@ namespace vault.iOS
         }
     }
 }
+
