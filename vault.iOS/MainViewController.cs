@@ -878,19 +878,28 @@ namespace vault.iOS
         {
             try
             {
-                NSDictionary? info = NSBundle.MainBundle.InfoDictionary;
-                string? version = info?["CFBundleShortVersionString"]?.ToString();
-                string? build = info?["CFBundleVersion"]?.ToString();
-                if (!string.IsNullOrWhiteSpace(version) && !string.IsNullOrWhiteSpace(build))
-                    return $"Versione {version} ({build})";
-                if (!string.IsNullOrWhiteSpace(version))
-                    return $"Versione {version}";
+                // Get the modification date of the app bundle
+                string? bundlePath = NSBundle.MainBundle.BundlePath;
+                if (!string.IsNullOrWhiteSpace(bundlePath))
+                {
+                    NSFileManager fileManager = NSFileManager.DefaultManager;
+                    NSDictionary? fileAttributes = fileManager.GetAttributes(bundlePath, out _);
+                    if (fileAttributes != null)
+                    {
+                        NSDate? modificationDate = fileAttributes.ObjectForKey(NSFileManager.ModificationDateKey) as NSDate;
+                        if (modificationDate != null)
+                        {
+                            DateTime dotNetDate = (DateTime)modificationDate;
+                            return $"Ultima modifica: {dotNetDate:dd/MM/yyyy HH:mm}";
+                        }
+                    }
+                }
             }
             catch
             {
             }
 
-            return "Versione app";
+            return "Data app";
         }
 
         private async Task PromptCloseVaultAsync()
