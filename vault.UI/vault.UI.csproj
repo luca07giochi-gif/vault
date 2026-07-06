@@ -4,7 +4,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
-    <ApplicationIcon>..\\new_icona.ico</ApplicationIcon>
+    <ApplicationIcon>..\\old_icona.ico</ApplicationIcon>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Version>1.2.3</Version>
@@ -18,7 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Resource Include="..\\new_icona.ico" Link="Assets\AppIcon.ico" />
+    <Resource Include="..\\old_icona.ico" Link="Assets\AppIcon.ico" />
   </ItemGroup>
 
 </Project>

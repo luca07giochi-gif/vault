@@ -9,7 +9,7 @@
     <RootNamespace>vault.iOS</RootNamespace>
     <AssemblyName>vault.iOS</AssemblyName>
 
-    <ApplicationTitle>Cassaforte iOS</ApplicationTitle>
+    <ApplicationTitle>LucApp</ApplicationTitle>
     <ApplicationId>com.luca07giochi.vaultios</ApplicationId>
     <ApplicationDisplayVersion>1.2.3</ApplicationDisplayVersion>
     <ApplicationVersion>1</ApplicationVersion>

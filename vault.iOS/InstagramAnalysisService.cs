@@ -1,7 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Foundation;
 
 namespace vault.iOS
 {
@@ -20,7 +24,7 @@ namespace vault.iOS
             public List<InstagramUser> NotFollowingBack { get; set; } = new();
         }
 
-        public async Task<AnalysisResult> AnalyzeFollowersAsync(string followersJson, string followingJson)
+        public async Task<AnalysisResult> AnalyzeFromZipAsync(NSUrl zipUrl)
         {
             return await Task.Run(() =>
             {
@@ -28,64 +32,81 @@ namespace vault.iOS
 
                 try
                 {
-                    // Parse JSON data (assuming Instagram data download format)
-                    result.Followers = ParseInstagramJson(followersJson).OrderBy(u => u.Username).ToList();
-                    result.Following = ParseInstagramJson(followingJson).OrderBy(u => u.Username).ToList();
+                    string zipPath = zipUrl.Path;
+                    if (!File.Exists(zipPath))
+                        return result;
 
-                    // Find users who we follow but don't follow us back
-                    var followersSet = new HashSet<string>(result.Followers.Select(u => u.Username.ToLower()));
-                    result.NotFollowingBack = result.Following
-                        .Where(u => !followersSet.Contains(u.Username.ToLower()))
-                        .OrderBy(u => u.Username)
-                        .ToList();
+                    using (var archive = ZipFile.OpenRead(zipPath))
+                    {
+                        string followersHtml = ExtractHtmlFromZip(archive, "connections/followers_and_following/followers_1.html");
+                        string followingHtml = ExtractHtmlFromZip(archive, "connections/followers_and_following/following.html");
+
+                        if (!string.IsNullOrEmpty(followersHtml))
+                            result.Followers = ParseInstagramHtml(followersHtml).OrderBy(u => u.Username).ToList();
+
+                        if (!string.IsNullOrEmpty(followingHtml))
+                            result.Following = ParseInstagramHtml(followingHtml).OrderBy(u => u.Username).ToList();
+
+                        // Find users who we follow but don't follow us back
+                        var followersSet = new HashSet<string>(result.Followers.Select(u => u.Username.ToLower()));
+                        result.NotFollowingBack = result.Following
+                            .Where(u => !followersSet.Contains(u.Username.ToLower()))
+                            .OrderBy(u => u.Username)
+                            .ToList();
+                    }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"Error analyzing followers: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"Error analyzing Instagram data: {ex.Message}");
                 }
 
                 return result;
             });
         }
 
-        private List<InstagramUser> ParseInstagramJson(string jsonData)
+        private string ExtractHtmlFromZip(ZipArchive archive, string entryPath)
+        {
+            var entry = archive.GetEntry(entryPath);
+            if (entry == null)
+                return string.Empty;
+
+            using (var reader = new StreamReader(entry.Open()))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        private List<InstagramUser> ParseInstagramHtml(string htmlContent)
         {
             var users = new List<InstagramUser>();
 
-            if (string.IsNullOrWhiteSpace(jsonData))
+            if (string.IsNullOrWhiteSpace(htmlContent))
                 return users;
 
             try
             {
-                // Try to parse as JSON array of objects with "string_list_data" key
-                // This is the format Instagram uses in their data download
-                int startIdx = 0;
-                while (true)
+                // Extract usernames from Instagram hrefs
+                var pattern = new Regex(@"https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]+)", RegexOptions.IgnoreCase);
+                var matches = pattern.Matches(htmlContent);
+
+                var usernameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (Match match in matches)
                 {
-                    int valueIdx = jsonData.IndexOf("\"value\":", startIdx);
-                    if (valueIdx < 0)
-                        break;
-
-                    int colonIdx = jsonData.IndexOf(":", valueIdx);
-                    int quoteIdx = jsonData.IndexOf("\"", colonIdx + 1);
-                    int endQuoteIdx = jsonData.IndexOf("\"", quoteIdx + 1);
-
-                    if (endQuoteIdx < 0)
-                        break;
-
-                    string username = jsonData.Substring(quoteIdx + 1, endQuoteIdx - quoteIdx - 1).Trim();
-
+                    string username = match.Groups[1].Value;
                     if (!string.IsNullOrWhiteSpace(username) && IsValidInstagramUsername(username))
                     {
-                        users.Add(new InstagramUser { Username = username });
+                        usernameSet.Add(username);
                     }
+                }
 
-                    startIdx = endQuoteIdx + 1;
+                foreach (var username in usernameSet.OrderBy(u => u))
+                {
+                    users.Add(new InstagramUser { Username = username });
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error parsing JSON: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Error parsing HTML: {ex.Message}");
             }
 
             return users;

@@ -145,14 +145,28 @@ namespace vault.iOS
 
             try
             {
-                await System.Threading.Tasks.Task.Delay(100);
-                
-                // For now, show a message that data import is being prepared
+                var result = await _analysisService.AnalyzeFromZipAsync(fileUrl);
+
                 BeginInvokeOnMainThread(() =>
                 {
                     _loadingIndicator?.StopAnimating();
                     _loadingIndicator!.Hidden = true;
-                    ShowNotification("Importazione non ancora implementata", "L'app è pronta per l'importazione dei dati di Instagram dal tuo download dati.");
+
+                    _followers = result.Followers;
+                    _following = result.Following;
+                    _notFollowingBack = result.NotFollowingBack;
+
+                    if (_followers.Count > 0 || _following.Count > 0)
+                    {
+                        _segmentControl!.Enabled = true;
+                        _emptyLabel!.Hidden = true;
+                        _tableView!.Hidden = false;
+                        OnSegmentChanged();
+                    }
+                    else
+                    {
+                        ShowNotification("Nessun dato trovato", "Non sono stati trovati dati Instagram validi nel file selezionato.");
+                    }
                 });
             }
             catch (Exception ex)
@@ -202,8 +216,8 @@ namespace vault.iOS
 
             if (_segmentControl != null && _importButton != null)
             {
-                _importButton.Frame = new CGRect(10, 8, View.Bounds.Width - 20, 36);
-                _segmentControl.Frame = new CGRect(10, 50, View.Bounds.Width - 20, 34);
+                _importButton!.Frame = new CGRect(10, 8, View.Bounds.Width - 20, 36);
+                _segmentControl!.Frame = new CGRect(10, 50, View.Bounds.Width - 20, 34);
             }
         }
     }
@@ -248,7 +262,7 @@ namespace vault.iOS
                 if (!string.IsNullOrWhiteSpace(user.InstagramUrl))
                 {
 #pragma warning disable CA1422
-                    UIApplication.SharedApplication.OpenUrl(new NSUrl(user.InstagramUrl), null, null);
+                    UIApplication.SharedApplication.OpenUrl(new NSUrl(user.InstagramUrl), new UIApplicationOpenUrlOptions(), null);
 #pragma warning restore CA1422
                 }
             }, UIControlEvent.TouchUpInside);

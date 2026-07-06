@@ -100,6 +100,7 @@ namespace vault.iOS
         private UILabel? _emptyLabel;
         private UIButton? _openVaultCenteredButton;
         private UIButton? _createVaultCenteredButton;
+        private UIButton? _extraButton;
         private UILabel? _homeVersionLabel;
         private UITabBar? _bottomTabBar;
         private UITabBarItem? _vaultTabItem;
@@ -304,6 +305,15 @@ namespace vault.iOS
             _createVaultCenteredButton.TouchUpInside += (_, _) => PromptCreateVaultSettingsMenu();
             View.AddSubview(_createVaultCenteredButton);
 
+            _extraButton = new UIButton(UIButtonType.System);
+            _extraButton.SetTitle("Extra", UIControlState.Normal);
+            _extraButton.SetTitleColor(UIColor.White, UIControlState.Normal);
+            _extraButton.BackgroundColor = UIColor.FromRGB(255, 159, 10);
+            _extraButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
+            _extraButton.Layer.CornerRadius = 13f;
+            _extraButton.TouchUpInside += (_, _) => ShowExtraMenu();
+            View.AddSubview(_extraButton);
+
             _homeVersionLabel = new UILabel
             {
                 TextAlignment = UITextAlignment.Center,
@@ -409,14 +419,14 @@ namespace vault.iOS
                 _collectionView.ScrollIndicatorInsets = new UIEdgeInsets(0, 0, bottomInset, 0);
             }
 
-            if (_openVaultCenteredButton != null || _createVaultCenteredButton != null)
+            if (_openVaultCenteredButton != null || _createVaultCenteredButton != null || _extraButton != null)
             {
                 nfloat buttonWidth = view.Bounds.Width - (nfloat)40f;
                 if (buttonWidth > 250f)
                     buttonWidth = 250f;
                 nfloat buttonHeight = 54f;
                 nfloat spacing = 12f;
-                nfloat totalHeight = (buttonHeight * 2f) + spacing;
+                nfloat totalHeight = (buttonHeight * 3f) + (spacing * 2f);
                 nfloat startY = (view.Bounds.Height - totalHeight) / 2f;
 
                 if (_openVaultCenteredButton != null)
@@ -433,6 +443,15 @@ namespace vault.iOS
                     _createVaultCenteredButton.Frame = new CGRect(
                         (view.Bounds.Width - buttonWidth) / 2f,
                         startY + buttonHeight + spacing,
+                        buttonWidth,
+                        buttonHeight);
+                }
+
+                if (_extraButton != null)
+                {
+                    _extraButton.Frame = new CGRect(
+                        (view.Bounds.Width - buttonWidth) / 2f,
+                        startY + (buttonHeight * 2f) + (spacing * 2f),
                         buttonWidth,
                         buttonHeight);
                 }
@@ -726,6 +745,8 @@ namespace vault.iOS
                 _openVaultCenteredButton.Hidden = hasVault;
             if (_createVaultCenteredButton != null)
                 _createVaultCenteredButton.Hidden = hasVault;
+            if (_extraButton != null)
+                _extraButton.Hidden = hasVault;
             if (_homeVersionLabel != null)
                 _homeVersionLabel.Hidden = hasVault;
 
@@ -2877,6 +2898,30 @@ namespace vault.iOS
             ClearPendingChangeSummary();
             UpdateUiState();
             return !HasPendingVaultSaveChanges;
+        }
+
+        private void ShowExtraMenu()
+        {
+            UIAlertController sheet = UIAlertController.Create(
+                "Extra",
+                "Funzionalita aggiuntive",
+                UIAlertControllerStyle.ActionSheet);
+
+            sheet.AddAction(UIAlertAction.Create(
+                "Analisi Instagram",
+                UIAlertActionStyle.Default,
+                __ => ShowInstagramAnalysis()));
+
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private void ShowInstagramAnalysis()
+        {
+            var instagramVC = new InstagramAnalysisViewController();
+            var navController = new UINavigationController(instagramVC);
+            PresentViewController(navController, true, null);
         }
 
         private void PromptCreateVaultSettingsMenu()
