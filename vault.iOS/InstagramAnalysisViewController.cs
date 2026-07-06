@@ -29,10 +29,10 @@ namespace vault.iOS
             Title = "Analisi Instagram";
             View.BackgroundColor = UIColor.White;
 
-            // Setup navigation
+            // Setup navigation - remove Done button since we're in a navigation controller
             NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
                 UIBarButtonSystemItem.Done,
-                (_, _) => DismissViewController(true, null));
+                (_, _) => NavigationController?.PopViewController(true));
 
             // Setup import button
             _importButton = UIButton.FromType(UIButtonType.System);
@@ -40,9 +40,6 @@ namespace vault.iOS
             _importButton.TitleLabel!.Font = UIFont.SystemFontOfSize(16, UIFontWeight.Semibold);
             _importButton.SetTitleColor(UIColor.FromRGB(10, 132, 255), UIControlState.Normal);
             _importButton.TouchUpInside += (_, _) => PickDataFile();
-
-            var importContainer = new UIView { BackgroundColor = UIColor.FromRGB(240, 240, 240) };
-            importContainer.AddSubview(_importButton);
 
             // Setup segment control for switching between lists
             _segmentControl = new UISegmentedControl(new[] { "Followers", "Seguiti", "Non mi seguono" })
@@ -52,25 +49,44 @@ namespace vault.iOS
             };
             _segmentControl.ValueChanged += (_, _) => OnSegmentChanged();
 
-            var headerView = new UIView(new CGRect(0, 0, View.Bounds.Width, 90))
+            // Create header view with proper spacing from navigation bar
+            var headerView = new UIView
             {
-                BackgroundColor = UIColor.FromRGB(240, 240, 240)
+                BackgroundColor = UIColor.FromRGB(240, 240, 240),
+                TranslatesAutoresizingMaskIntoConstraints = false
             };
-            _importButton.Frame = new CGRect(10, 8, View.Bounds.Width - 20, 36);
-            _importButton.AutoresizingMask = UIViewAutoresizing.FlexibleWidth;
-            headerView.AddSubview(_importButton);
 
-            _segmentControl.Frame = new CGRect(10, 50, View.Bounds.Width - 20, 34);
-            _segmentControl.AutoresizingMask = UIViewAutoresizing.FlexibleWidth;
+            headerView.AddSubview(_importButton);
             headerView.AddSubview(_segmentControl);
-            headerView.AutoresizingMask = UIViewAutoresizing.FlexibleWidth;
 
             View.AddSubview(headerView);
 
-            // Setup table view
-            _tableView = new UITableView(new CGRect(0, 90, View.Bounds.Width, View.Bounds.Height - 90), UITableViewStyle.Plain)
+            // Setup constraints for header
+            _importButton.TranslatesAutoresizingMaskIntoConstraints = false;
+            _segmentControl.TranslatesAutoresizingMaskIntoConstraints = false;
+
+            NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
             {
-                AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight,
+                headerView.TopAnchor.ConstraintEqualTo(View.SafeAreaLayoutGuide.TopAnchor),
+                headerView.LeadingAnchor.ConstraintEqualTo(View.LeadingAnchor),
+                headerView.TrailingAnchor.ConstraintEqualTo(View.TrailingAnchor),
+                headerView.HeightAnchor.ConstraintEqualTo(90),
+
+                _importButton.TopAnchor.ConstraintEqualTo(headerView.TopAnchor, 8),
+                _importButton.LeadingAnchor.ConstraintEqualTo(headerView.LeadingAnchor, 10),
+                _importButton.TrailingAnchor.ConstraintEqualTo(headerView.TrailingAnchor, -10),
+                _importButton.HeightAnchor.ConstraintEqualTo(36),
+
+                _segmentControl.TopAnchor.ConstraintEqualTo(_importButton.BottomAnchor, 6),
+                _segmentControl.LeadingAnchor.ConstraintEqualTo(headerView.LeadingAnchor, 10),
+                _segmentControl.TrailingAnchor.ConstraintEqualTo(headerView.TrailingAnchor, -10),
+                _segmentControl.HeightAnchor.ConstraintEqualTo(34)
+            });
+
+            // Setup table view
+            _tableView = new UITableView(UITableViewStyle.Plain)
+            {
+                TranslatesAutoresizingMaskIntoConstraints = false,
                 Delegate = new InstagramTableDelegate(),
                 DataSource = new InstagramTableSource(_currentList),
                 Hidden = true
@@ -79,10 +95,18 @@ namespace vault.iOS
             _tableView.RowHeight = 60;
             View.AddSubview(_tableView);
 
-            // Setup empty label
-            _emptyLabel = new UILabel(new CGRect(0, 90, View.Bounds.Width, View.Bounds.Height - 90))
+            NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
             {
-                AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight,
+                _tableView.TopAnchor.ConstraintEqualTo(headerView.BottomAnchor),
+                _tableView.LeadingAnchor.ConstraintEqualTo(View.LeadingAnchor),
+                _tableView.TrailingAnchor.ConstraintEqualTo(View.TrailingAnchor),
+                _tableView.BottomAnchor.ConstraintEqualTo(View.BottomAnchor)
+            });
+
+            // Setup empty label
+            _emptyLabel = new UILabel
+            {
+                TranslatesAutoresizingMaskIntoConstraints = false,
                 TextAlignment = UITextAlignment.Center,
                 TextColor = UIColor.DarkGray,
                 Text = "Importa i dati di Instagram per iniziare l'analisi",
@@ -91,15 +115,27 @@ namespace vault.iOS
             };
             View.AddSubview(_emptyLabel);
 
+            NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
+            {
+                _emptyLabel.TopAnchor.ConstraintEqualTo(headerView.BottomAnchor),
+                _emptyLabel.LeadingAnchor.ConstraintEqualTo(View.LeadingAnchor),
+                _emptyLabel.TrailingAnchor.ConstraintEqualTo(View.TrailingAnchor),
+                _emptyLabel.BottomAnchor.ConstraintEqualTo(View.BottomAnchor)
+            });
+
             // Setup loading indicator
             _loadingIndicator = new UIActivityIndicatorView(UIActivityIndicatorViewStyle.Large)
             {
-                Center = new CGPoint(View.Bounds.GetMidX(), View.Bounds.GetMidY()),
-                AutoresizingMask = UIViewAutoresizing.FlexibleTopMargin | UIViewAutoresizing.FlexibleBottomMargin |
-                                   UIViewAutoresizing.FlexibleLeftMargin | UIViewAutoresizing.FlexibleRightMargin,
-                Hidden = true
+                TranslatesAutoresizingMaskIntoConstraints = false,
+                HidesWhenStopped = true
             };
             View.AddSubview(_loadingIndicator);
+
+            NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
+            {
+                _loadingIndicator.CenterXAnchor.ConstraintEqualTo(View.CenterXAnchor),
+                _loadingIndicator.CenterYAnchor.ConstraintEqualTo(View.CenterYAnchor)
+            });
         }
 
         private void PickDataFile()
@@ -208,17 +244,6 @@ namespace vault.iOS
             var alert = UIAlertController.Create(title, message, UIAlertControllerStyle.Alert);
             alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, null));
             PresentViewController(alert, true, null);
-        }
-
-        public override void ViewWillLayoutSubviews()
-        {
-            base.ViewWillLayoutSubviews();
-
-            if (_segmentControl != null && _importButton != null)
-            {
-                _importButton!.Frame = new CGRect(10, 8, View.Bounds.Width - 20, 36);
-                _segmentControl!.Frame = new CGRect(10, 50, View.Bounds.Width - 20, 34);
-            }
         }
     }
 

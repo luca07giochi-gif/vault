@@ -21,7 +21,17 @@
       <dict>
         <key>CFBundleIconFiles</key>
         <array>
-          <string>new_icona</string>
+          <string>AppIcon-60</string>
+          <string>AppIcon-76</string>
+          <string>AppIcon-40</string>
+          <string>AppIcon-58</string>
+          <string>AppIcon-80</string>
+          <string>AppIcon-87</string>
+          <string>AppIcon-120</string>
+          <string>AppIcon-152</string>
+          <string>AppIcon-167</string>
+          <string>AppIcon-180</string>
+          <string>AppIcon-1024</string>
         </array>
         <key>UIPrerenderedIcon</key>
         <false />
@@ -33,7 +43,17 @@
       <dict>
         <key>CFBundleIconFiles</key>
         <array>
-          <string>new_icona</string>
+          <string>AppIcon-60</string>
+          <string>AppIcon-76</string>
+          <string>AppIcon-40</string>
+          <string>AppIcon-58</string>
+          <string>AppIcon-80</string>
+          <string>AppIcon-87</string>
+          <string>AppIcon-120</string>
+          <string>AppIcon-152</string>
+          <string>AppIcon-167</string>
+          <string>AppIcon-180</string>
+          <string>AppIcon-1024</string>
         </array>
         <key>UIPrerenderedIcon</key>
         <false />

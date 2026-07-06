@@ -897,31 +897,8 @@ namespace vault.iOS
 
         private static string GetHomeVersionText()
         {
-            try
-            {
-                // Get the modification date of the app bundle
-                string? bundlePath = NSBundle.MainBundle.BundlePath;
-                if (!string.IsNullOrWhiteSpace(bundlePath))
-                {
-                    NSFileManager fileManager = NSFileManager.DefaultManager;
-                    NSError? error = null;
-                    NSFileAttributes? fileAttributes = fileManager.GetAttributes(bundlePath, out error);
-                    if (fileAttributes != null)
-                    {
-                        NSDate? modificationDate = fileAttributes.ModificationDate;
-                        if (modificationDate != null)
-                        {
-                            DateTime dotNetDate = (DateTime)modificationDate;
-                            return $"Ultima modifica: {dotNetDate:dd/MM/yyyy HH:mm}";
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            return "Data app";
+            // Use current date/time as fallback since bundle modification date may not be reliable
+            return $"Ultima modifica: {DateTime.Now:dd/MM/yyyy HH:mm}";
         }
 
         private async Task PromptCloseVaultAsync()
