@@ -32,8 +32,8 @@ namespace vault.iOS
 
                 try
                 {
-                    string zipPath = zipUrl.Path;
-                    if (!File.Exists(zipPath))
+                    string? zipPath = zipUrl.Path;
+                    if (string.IsNullOrEmpty(zipPath) || !File.Exists(zipPath))
                         return result;
 
                     using (var archive = ZipFile.OpenRead(zipPath))

@@ -27,7 +27,7 @@ namespace vault.iOS
             base.ViewDidLoad();
 
             Title = "Analisi Instagram";
-            View.BackgroundColor = UIColor.White;
+            View!.BackgroundColor = UIColor.White;
 
             // Setup navigation - remove Done button since we're in a navigation controller
             NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
@@ -84,7 +84,7 @@ namespace vault.iOS
             });
 
             // Setup table view
-            _tableView = new UITableView(UITableViewStyle.Plain)
+            _tableView = new UITableView(CGRect.Empty, UITableViewStyle.Plain)
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 Delegate = new InstagramTableDelegate(),
