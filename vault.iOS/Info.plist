@@ -6,7 +6,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Cassaforte iOS</string>
+    <string>LucApp</string>
     <key>CFBundleExecutable</key>
     <string>vault.iOS</string>
     <key>CFBundleIdentifier</key>
@@ -14,7 +14,7 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Cassaforte iOS</string>
+    <string>LucApp</string>
     <key>CFBundleIcons</key>
     <dict>
       <key>CFBundlePrimaryIcon</key>

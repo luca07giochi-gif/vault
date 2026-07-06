@@ -107,6 +107,7 @@ namespace vault.iOS
         private UITabBarItem? _viewTabItem;
         private UITabBarItem? _renameTabItem;
         private UITabBarItem? _settingsTabItem;
+        private UITabBarItem? _extraTabItem;
         private UIView? _busyOverlay;
         private UIActivityIndicatorView? _busyIndicator;
         private UILabel? _busyLabel;
@@ -464,7 +465,8 @@ namespace vault.iOS
             _addTabItem = new UITabBarItem("Aggiungi", UIImage.GetSystemImage("plus.circle"), 1);
             _viewTabItem = new UITabBarItem("Anteprime", UIImage.GetSystemImage("square.grid.2x2"), 2);
             _renameTabItem = new UITabBarItem("Rimuovi", UIImage.GetSystemImage("trash"), 3);
-            _settingsTabItem = new UITabBarItem("Impostazioni", UIImage.GetSystemImage("gearshape"), 4);
+            _extraTabItem = new UITabBarItem("Extra", UIImage.GetSystemImage("star.fill"), 4);
+            _settingsTabItem = new UITabBarItem("Impostazioni", UIImage.GetSystemImage("gearshape"), 5);
 
             _bottomTabBar = new UITabBar
             {
@@ -477,6 +479,7 @@ namespace vault.iOS
                     _addTabItem,
                     _viewTabItem,
                     _renameTabItem,
+                    _extraTabItem,
                     _settingsTabItem
                 }
             };
@@ -501,6 +504,12 @@ namespace vault.iOS
             {
                 if (_session != null)
                     HandleMoveRequestFromBottomMenu();
+                return;
+            }
+
+            if (ReferenceEquals(item, _extraTabItem))
+            {
+                OpenInstagramAnalysis();
                 return;
             }
 
@@ -1287,6 +1296,14 @@ namespace vault.iOS
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             ConfigurePopover(sheet);
             PresentViewController(sheet, true, null);
+        }
+
+        private void OpenInstagramAnalysis()
+        {
+            var instagramController = new InstagramAnalysisViewController();
+            var navigationController = new UINavigationController(instagramController);
+            navigationController.ModalPresentationStyle = UIModalPresentationStyle.FormSheet;
+            PresentViewController(navigationController, true, null);
         }
 
         private void ApplyItemSortMode(ItemSortMode mode)
