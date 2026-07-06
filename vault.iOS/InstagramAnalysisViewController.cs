@@ -104,6 +104,7 @@ namespace vault.iOS
 
         private void PickDataFile()
         {
+#pragma warning disable CA1422
             var types = new[] { "com.pkware.zip-archive", "public.json", "com.compuserve.gif" };
             _documentPicker = new UIDocumentPickerViewController(types, UIDocumentPickerMode.Import)
             {
@@ -115,6 +116,7 @@ namespace vault.iOS
             {
                 PresentViewController(_documentPicker, true, null);
             }
+#pragma warning restore CA1422
         }
 
         [Export("documentPicker:didPickDocumentsAtURLs:")]
@@ -137,17 +139,19 @@ namespace vault.iOS
         {
             BeginInvokeOnMainThread(() =>
             {
-                _loadingIndicator!.StartAnimating();
-                _loadingIndicator.Hidden = false;
+                _loadingIndicator?.StartAnimating();
+                _loadingIndicator!.Hidden = false;
             });
 
             try
             {
+                await System.Threading.Tasks.Task.Delay(100);
+                
                 // For now, show a message that data import is being prepared
                 BeginInvokeOnMainThread(() =>
                 {
-                    _loadingIndicator!.StopAnimating();
-                    _loadingIndicator.Hidden = true;
+                    _loadingIndicator?.StopAnimating();
+                    _loadingIndicator!.Hidden = true;
                     ShowNotification("Importazione non ancora implementata", "L'app è pronta per l'importazione dei dati di Instagram dal tuo download dati.");
                 });
             }
@@ -155,8 +159,8 @@ namespace vault.iOS
             {
                 BeginInvokeOnMainThread(() =>
                 {
-                    _loadingIndicator!.StopAnimating();
-                    _loadingIndicator.Hidden = true;
+                    _loadingIndicator?.StopAnimating();
+                    _loadingIndicator!.Hidden = true;
                     ShowNotification("Errore", $"Si è verificato un errore: {ex.Message}");
                 });
             }
@@ -243,7 +247,9 @@ namespace vault.iOS
             {
                 if (!string.IsNullOrWhiteSpace(user.InstagramUrl))
                 {
-                    UIApplication.SharedApplication.OpenUrl(new NSUrl(user.InstagramUrl));
+#pragma warning disable CA1422
+                    UIApplication.SharedApplication.OpenUrl(new NSUrl(user.InstagramUrl), null, null);
+#pragma warning restore CA1422
                 }
             }, UIControlEvent.TouchUpInside);
         }

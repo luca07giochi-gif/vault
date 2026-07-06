@@ -883,10 +883,11 @@ namespace vault.iOS
                 if (!string.IsNullOrWhiteSpace(bundlePath))
                 {
                     NSFileManager fileManager = NSFileManager.DefaultManager;
-                    NSDictionary? fileAttributes = fileManager.GetAttributes(bundlePath, out _);
+                    NSError? error = null;
+                    NSFileAttributes? fileAttributes = fileManager.GetAttributes(bundlePath, out error);
                     if (fileAttributes != null)
                     {
-                        NSDate? modificationDate = fileAttributes.ObjectForKey(NSFileManager.ModificationDateKey) as NSDate;
+                        NSDate? modificationDate = fileAttributes.ModificationDate;
                         if (modificationDate != null)
                         {
                             DateTime dotNetDate = (DateTime)modificationDate;
