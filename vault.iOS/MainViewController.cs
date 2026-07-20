@@ -30,6 +30,10 @@ namespace vault.iOS
         private const string PreviewPerformancePreferenceKey = "vault.ios.preview.performance";
         private const string PreviewPerformanceFastValue = "fast";
         private const string PreviewPerformanceCompactValue = "compact";
+        private const string ItemSortPreferenceKey = "vault.ios.item.sort";
+        private const string ItemSortNameAscendingValue = "name_asc";
+        private const string ItemSortNameDescendingValue = "name_desc";
+        private const string ItemSortLatestAddedValue = "latest_added";
         private const int ThumbnailCacheLimit = 36;
         private const int ThumbnailDiskCacheFileLimit = 260;
         private const int ThumbnailPrefetchPadding = 8;
@@ -184,6 +188,19 @@ namespace vault.iOS
             ApplyPreviewPerformanceMode(mode, persist: false);
         }
 
+        private void LoadItemSortPreference()
+        {
+            string? raw = NSUserDefaults.StandardUserDefaults.StringForKey(ItemSortPreferenceKey);
+            ItemSortMode mode = raw switch
+            {
+                ItemSortNameDescendingValue => ItemSortMode.NameDescending,
+                ItemSortLatestAddedValue => ItemSortMode.LatestAdded,
+                _ => ItemSortMode.NameAscending
+            };
+
+            _itemSortMode = mode;
+        }
+
         private void ApplyPreviewPerformanceMode(PreviewPerformanceMode mode, bool persist)
         {
             _previewPerformanceMode = mode;
@@ -235,6 +252,7 @@ namespace vault.iOS
             base.ViewDidLoad();
 
             LoadPreviewPerformancePreference();
+            LoadItemSortPreference();
 
             View!.BackgroundColor = UIColor.White;
 
@@ -1247,6 +1265,10 @@ namespace vault.iOS
                     UIAlertActionStyle.Default,
                     __ => OpenSortMenu()));
                 sheet.AddAction(UIAlertAction.Create(
+                    "Scegli ordinamento file di default",
+                    UIAlertActionStyle.Default,
+                    __ => OpenDefaultSortMenu()));
+                sheet.AddAction(UIAlertAction.Create(
                     $"Anteprime: {GetPreviewPerformanceLabel(_previewPerformanceMode)}",
                     UIAlertActionStyle.Default,
                     __ => OpenPreviewPerformanceMenu()));
@@ -1298,9 +1320,20 @@ namespace vault.iOS
         private void OpenSortMenu()
         {
             UIAlertController sheet = UIAlertController.Create("Ordina file", null, UIAlertControllerStyle.ActionSheet);
-            sheet.AddAction(UIAlertAction.Create("Nome A-Z", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameAscending)));
-            sheet.AddAction(UIAlertAction.Create("Nome Z-A", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameDescending)));
-            sheet.AddAction(UIAlertAction.Create("Ultima aggiunta", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.LatestAdded)));
+            sheet.AddAction(UIAlertAction.Create("Nome A-Z", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameAscending, persist: false)));
+            sheet.AddAction(UIAlertAction.Create("Nome Z-A", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameDescending, persist: false)));
+            sheet.AddAction(UIAlertAction.Create("Ultima aggiunta", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.LatestAdded, persist: false)));
+            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
+            ConfigurePopover(sheet);
+            PresentViewController(sheet, true, null);
+        }
+
+        private void OpenDefaultSortMenu()
+        {
+            UIAlertController sheet = UIAlertController.Create("Scegli ordinamento file di default", null, UIAlertControllerStyle.ActionSheet);
+            sheet.AddAction(UIAlertAction.Create("Nome A-Z", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameAscending, persist: true)));
+            sheet.AddAction(UIAlertAction.Create("Nome Z-A", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.NameDescending, persist: true)));
+            sheet.AddAction(UIAlertAction.Create("Ultima aggiunta", UIAlertActionStyle.Default, __ => ApplyItemSortMode(ItemSortMode.LatestAdded, persist: true)));
             sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
             ConfigurePopover(sheet);
             PresentViewController(sheet, true, null);
@@ -1314,12 +1347,27 @@ namespace vault.iOS
             PresentViewController(navigationController, true, null);
         }
 
-        private void ApplyItemSortMode(ItemSortMode mode)
+        private void ApplyItemSortMode(ItemSortMode mode, bool persist = true)
         {
             if (_itemSortMode == mode)
                 return;
 
             _itemSortMode = mode;
+
+            if (persist)
+            {
+                // Save preference
+                NSUserDefaults defaults = NSUserDefaults.StandardUserDefaults;
+                string value = mode switch
+                {
+                    ItemSortMode.NameDescending => ItemSortNameDescendingValue,
+                    ItemSortMode.LatestAdded => ItemSortLatestAddedValue,
+                    _ => ItemSortNameAscendingValue
+                };
+                defaults.SetString(value, ItemSortPreferenceKey);
+                defaults.Synchronize();
+            }
+
             ReloadFolderItems();
         }
 
