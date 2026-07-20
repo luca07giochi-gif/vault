@@ -34,6 +34,7 @@ namespace vault.iOS
         private const string ItemSortNameAscendingValue = "name_asc";
         private const string ItemSortNameDescendingValue = "name_desc";
         private const string ItemSortLatestAddedValue = "latest_added";
+        private const string AutoOpenVaultPreferenceKey = "vault.ios.auto.open.vault";
         private const int ThumbnailCacheLimit = 36;
         private const int ThumbnailDiskCacheFileLimit = 260;
         private const int ThumbnailPrefetchPadding = 8;
@@ -140,6 +141,7 @@ namespace vault.iOS
         private CancellationTokenSource? _pendingImportPromptCts;
         private bool _manualSaveModeEnabled;
         private NSUrl? _pendingIncomingVaultUrl;
+        private string? _autoOpenVaultPath;
 
         private bool HasPendingVaultSaveChanges =>
             _session != null && (_session.IsDirty || _session.NeedsVaultIdUpgrade);
@@ -201,6 +203,11 @@ namespace vault.iOS
             _itemSortMode = mode;
         }
 
+        private void LoadAutoOpenVaultPreference()
+        {
+            _autoOpenVaultPath = NSUserDefaults.StandardUserDefaults.StringForKey(AutoOpenVaultPreferenceKey);
+        }
+
         private void ApplyPreviewPerformanceMode(PreviewPerformanceMode mode, bool persist)
         {
             _previewPerformanceMode = mode;
@@ -253,6 +260,7 @@ namespace vault.iOS
 
             LoadPreviewPerformancePreference();
             LoadItemSortPreference();
+            LoadAutoOpenVaultPreference();
 
             View!.BackgroundColor = UIColor.White;
 
@@ -360,6 +368,17 @@ namespace vault.iOS
                 _pendingIncomingVaultUrl = null;
                 PromptPasswordAndOpenVault(pendingUrl);
                 return;
+            }
+
+            // Auto-open vault if configured and no session is active
+            if (_session == null && !string.IsNullOrWhiteSpace(_autoOpenVaultPath) && File.Exists(_autoOpenVaultPath))
+            {
+                NSUrl autoOpenUrl = NSUrl.FromFilename(_autoOpenVaultPath);
+                if (autoOpenUrl != null)
+                {
+                    PromptPasswordAndOpenVault(autoOpenUrl);
+                    return;
+                }
             }
 
             if (_session != null)
@@ -2262,32 +2281,49 @@ namespace vault.iOS
         {
             ShareVaultRegistryBridge.RepublishAppManagedVaults();
             IReadOnlyList<RecentVaultRecord> recentVaults = ShareVaultRegistryBridge.LoadAppManagedVaults();
-            if (recentVaults.Count == 0)
-            {
-                ShowSimpleAlert("Nessun vault disponibile", "Apri un vault per farlo comparire nel menu Condividi.");
-                return;
-            }
 
             UIAlertController alert = UIAlertController.Create(
                 "Vault visibili nel menu Condividi",
-                $"{recentVaults.Count} vault disponibili",
+                recentVaults.Count > 0 ? $"{recentVaults.Count} vault disponibili" : "Nessun vault disponibile",
                 UIAlertControllerStyle.Alert);
 
-            foreach (RecentVaultRecord vault in recentVaults)
+            // Add option to disable auto-open vault if one is set
+            if (!string.IsNullOrWhiteSpace(_autoOpenVaultPath))
             {
-                string displayName = vault.DisplayName ?? "Vault";
-                string vaultPath = vault.LastKnownPath ?? "(percorso sconosciuto)";
-                string actionTitle = $"{displayName}\n{vaultPath}";
-
+                string autoOpenVaultName = Path.GetFileName(_autoOpenVaultPath);
                 alert.AddAction(UIAlertAction.Create(
-                    actionTitle,
+                    $"Disabilita apertura automatica: {autoOpenVaultName}",
                     UIAlertActionStyle.Default,
-                    _ => PromptVaultActions(vault)));
+                    _ => ClearAutoOpenVault()));
+            }
+
+            if (recentVaults.Count > 0)
+            {
+                foreach (RecentVaultRecord vault in recentVaults)
+                {
+                    string displayName = vault.DisplayName ?? "Vault";
+                    string vaultPath = vault.LastKnownPath ?? "(percorso sconosciuto)";
+                    string actionTitle = $"{displayName}\n{vaultPath}";
+
+                    alert.AddAction(UIAlertAction.Create(
+                        actionTitle,
+                        UIAlertActionStyle.Default,
+                        _ => PromptVaultActions(vault)));
+                }
             }
 
             alert.AddAction(UIAlertAction.Create("Chiudi", UIAlertActionStyle.Cancel, null));
 
             PresentViewController(alert, true, null);
+        }
+
+        private void ClearAutoOpenVault()
+        {
+            _autoOpenVaultPath = null;
+            NSUserDefaults defaults = NSUserDefaults.StandardUserDefaults;
+            defaults.RemoveObject(AutoOpenVaultPreferenceKey);
+            defaults.Synchronize();
+            ShowSimpleAlert("Apertura automatica disabilitata", "Il vault non verrà più aperto automaticamente all'avvio dell'app.");
         }
 
         private void PromptVaultActions(RecentVaultRecord vault)
@@ -3397,9 +3433,11 @@ namespace vault.iOS
                 return;
             }
 
+            string vaultPath = vaultUrl.Path ?? string.Empty;
+
             if (!header.RequiresPassword)
             {
-                _ = OpenVaultAsync(vaultUrl, string.Empty, header);
+                PromptAutoOpenVault(vaultUrl, vaultPath, string.Empty, header);
                 return;
             }
 
@@ -3422,10 +3460,43 @@ namespace vault.iOS
             prompt.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, __ =>
             {
                 string password = prompt.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
-                _ = OpenVaultAsync(vaultUrl, password);
+                PromptAutoOpenVault(vaultUrl, vaultPath, password, header);
             }));
 
             PresentViewController(prompt, true, null);
+        }
+
+        private void PromptAutoOpenVault(NSUrl vaultUrl, string vaultPath, string password, VaultFileFormat.Header? knownHeader = null)
+        {
+            // Check if this is already the auto-open vault
+            if (string.Equals(vaultPath, _autoOpenVaultPath, StringComparison.OrdinalIgnoreCase))
+            {
+                _ = OpenVaultAsync(vaultUrl, password, knownHeader);
+                return;
+            }
+
+            UIAlertController alert = UIAlertController.Create(
+                "Apertura automatica",
+                $"Vuoi aprire sempre questo vault ({Path.GetFileName(vaultPath)}) all'avvio dell'app?",
+                UIAlertControllerStyle.Alert);
+
+            alert.AddAction(UIAlertAction.Create("No", UIAlertActionStyle.Default, __ =>
+            {
+                _ = OpenVaultAsync(vaultUrl, password, knownHeader);
+            }));
+
+            alert.AddAction(UIAlertAction.Create("Sì", UIAlertActionStyle.Default, __ =>
+            {
+                // Save the auto-open vault preference
+                _autoOpenVaultPath = vaultPath;
+                NSUserDefaults defaults = NSUserDefaults.StandardUserDefaults;
+                defaults.SetString(vaultPath, AutoOpenVaultPreferenceKey);
+                defaults.Synchronize();
+
+                _ = OpenVaultAsync(vaultUrl, password, knownHeader);
+            }));
+
+            PresentViewController(alert, true, null);
         }
 
         private async Task OpenVaultAsync(NSUrl vaultUrl, string password, VaultFileFormat.Header? knownHeader = null)
@@ -5584,6 +5655,12 @@ namespace vault.iOS
             if (imageSource == null || imageSource.ImageCount == 0)
                 return null;
 
+            // Get image orientation from EXIF data
+            using CGImageProperties? properties = imageSource.GetPropertiesAtIndex(0, null);
+            nint orientation = properties?.Dictionary.TryGetValue(CGImageProperties.Orientation, out NSObject? orientationValue) == true
+                ? (orientationValue as NSNumber)?.Int32Value ?? 1
+                : 1;
+
             using CGImage? cgImage = imageSource.CreateThumbnail(0, new CGImageThumbnailOptions
             {
                 CreateThumbnailFromImageIfAbsent = true,
@@ -5595,7 +5672,7 @@ namespace vault.iOS
             if (cgImage == null)
                 return null;
 
-            UIImage? baseImage = UIImage.FromImage(cgImage);
+            UIImage? baseImage = UIImage.FromImage(cgImage, 1, (UIImageOrientation)orientation);
             if (baseImage == null)
                 return null;
 
@@ -5616,11 +5693,75 @@ namespace vault.iOS
             if (baseImage == null)
                 return null;
 
+            // Fix orientation for full resolution images
+            if (baseImage.Orientation != UIImageOrientation.Up)
+            {
+                UIImage? fixedImage = FixOrientation(baseImage);
+                if (fixedImage != null)
+                {
+                    baseImage.Dispose();
+                    return fixedImage.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
+                }
+            }
+
             UIImage rendered = baseImage.ImageWithRenderingMode(UIImageRenderingMode.AlwaysOriginal);
             if (!ReferenceEquals(rendered, baseImage))
                 baseImage.Dispose();
 
             return rendered;
+        }
+
+        private static UIImage? FixOrientation(UIImage image)
+        {
+            if (image.Orientation == UIImageOrientation.Up)
+                return image;
+
+            UIGraphics.BeginImageContextWithOptions(new CGSize(image.Width, image.Height), false, image.Scale);
+            var context = UIGraphics.GetCurrentContext();
+
+            if (image.Orientation == UIImageOrientation.Down)
+            {
+                context.TranslateCTM(image.Width, image.Height);
+                context.RotateCTM((nfloat)Math.PI);
+            }
+            else if (image.Orientation == UIImageOrientation.Left)
+            {
+                context.TranslateCTM(0, image.Height);
+                context.RotateCTM((nfloat)(3 * Math.PI / 2));
+            }
+            else if (image.Orientation == UIImageOrientation.Right)
+            {
+                context.TranslateCTM(image.Width, 0);
+                context.RotateCTM((nfloat)(Math.PI / 2));
+            }
+            else if (image.Orientation == UIImageOrientation.UpMirrored)
+            {
+                context.TranslateCTM(image.Width, 0);
+                context.ScaleCTM(-1, 1);
+            }
+            else if (image.Orientation == UIImageOrientation.DownMirrored)
+            {
+                context.TranslateCTM(0, image.Height);
+                context.ScaleCTM(-1, 1);
+            }
+            else if (image.Orientation == UIImageOrientation.LeftMirrored)
+            {
+                context.TranslateCTM(image.Height, 0);
+                context.ScaleCTM(-1, 1);
+                context.RotateCTM((nfloat)(3 * Math.PI / 2));
+            }
+            else if (image.Orientation == UIImageOrientation.RightMirrored)
+            {
+                context.TranslateCTM(0, image.Width);
+                context.ScaleCTM(-1, 1);
+                context.RotateCTM((nfloat)(Math.PI / 2));
+            }
+
+            image.Draw(new CGPoint(0, 0));
+            UIImage? fixedImage = UIGraphics.GetImageFromCurrentImageContext();
+            UIGraphics.EndImageContext();
+
+            return fixedImage;
         }
 
         private static bool IsImagePreviewCandidate(string? fileName)
