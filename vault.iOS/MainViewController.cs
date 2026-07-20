@@ -5656,8 +5656,9 @@ namespace vault.iOS
                 return null;
 
             // Get image orientation from EXIF data
-            using CGImageProperties? properties = imageSource.GetPropertiesAtIndex(0, null);
-            nint orientation = properties?.Dictionary.TryGetValue(CGImageProperties.Orientation, out NSObject? orientationValue) == true
+            var imageOptions = new CGImageOptions();
+            using var properties = imageSource.CopyPropertiesAtIndex(0, imageOptions);
+            nint orientation = properties?.Dictionary.TryGetValue(ImageIO.CGImageProperties.Orientation, out NSObject? orientationValue) == true
                 ? (orientationValue as NSNumber)?.Int32Value ?? 1
                 : 1;
 
@@ -5716,43 +5717,43 @@ namespace vault.iOS
             if (image.Orientation == UIImageOrientation.Up)
                 return image;
 
-            UIGraphics.BeginImageContextWithOptions(new CGSize(image.Width, image.Height), false, image.Scale);
+            UIGraphics.BeginImageContextWithOptions(new CGSize(image.Size.Width, image.Size.Height), false, image.Scale);
             var context = UIGraphics.GetCurrentContext();
 
             if (image.Orientation == UIImageOrientation.Down)
             {
-                context.TranslateCTM(image.Width, image.Height);
+                context.TranslateCTM(image.Size.Width, image.Size.Height);
                 context.RotateCTM((nfloat)Math.PI);
             }
             else if (image.Orientation == UIImageOrientation.Left)
             {
-                context.TranslateCTM(0, image.Height);
+                context.TranslateCTM(0, image.Size.Height);
                 context.RotateCTM((nfloat)(3 * Math.PI / 2));
             }
             else if (image.Orientation == UIImageOrientation.Right)
             {
-                context.TranslateCTM(image.Width, 0);
+                context.TranslateCTM(image.Size.Width, 0);
                 context.RotateCTM((nfloat)(Math.PI / 2));
             }
             else if (image.Orientation == UIImageOrientation.UpMirrored)
             {
-                context.TranslateCTM(image.Width, 0);
+                context.TranslateCTM(image.Size.Width, 0);
                 context.ScaleCTM(-1, 1);
             }
             else if (image.Orientation == UIImageOrientation.DownMirrored)
             {
-                context.TranslateCTM(0, image.Height);
+                context.TranslateCTM(0, image.Size.Height);
                 context.ScaleCTM(-1, 1);
             }
             else if (image.Orientation == UIImageOrientation.LeftMirrored)
             {
-                context.TranslateCTM(image.Height, 0);
+                context.TranslateCTM(image.Size.Height, 0);
                 context.ScaleCTM(-1, 1);
                 context.RotateCTM((nfloat)(3 * Math.PI / 2));
             }
             else if (image.Orientation == UIImageOrientation.RightMirrored)
             {
-                context.TranslateCTM(0, image.Width);
+                context.TranslateCTM(0, image.Size.Width);
                 context.ScaleCTM(-1, 1);
                 context.RotateCTM((nfloat)(Math.PI / 2));
             }
