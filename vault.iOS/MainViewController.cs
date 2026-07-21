@@ -5647,7 +5647,7 @@ namespace vault.iOS
             if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
                 return null;
 
-            NSUrl fileUrl = NSUrl.FromFilename(sourceUrl: sourcePath);
+            NSUrl fileUrl = NSUrl.FromFilename(sourcePath);
             using CGImageSource? imageSource = CGImageSource.FromUrl(fileUrl, new CGImageOptions
             {
                 ShouldCache = false
