@@ -8,16 +8,22 @@ namespace vault.iOS
 {
     public sealed class InstagramAnalysisViewController : UIViewController, IUIDocumentPickerDelegate
     {
-        private UISegmentedControl? _segmentControl;
         private UITableView? _tableView;
         private UILabel? _emptyLabel;
         private UIActivityIndicatorView? _loadingIndicator;
-        private UIButton? _importButton;
+        private UITabBar? _bottomTabBar;
 
         private List<InstagramAnalysisService.InstagramUser> _followers = new();
         private List<InstagramAnalysisService.InstagramUser> _following = new();
         private List<InstagramAnalysisService.InstagramUser> _notFollowingBack = new();
-        
+        private List<InstagramAnalysisService.InstagramUser> _currentList = new();
+
+        private UITabBarItem? _homeTabItem;
+        private UITabBarItem? _importTabItem;
+        private UITabBarItem? _followersTabItem;
+        private UITabBarItem? _followingTabItem;
+        private UITabBarItem? _notFollowingBackTabItem;
+
         private InstagramAnalysisService _analysisService = new();
         private UIDocumentPickerViewController? _documentPicker;
 
@@ -27,82 +33,35 @@ namespace vault.iOS
 
             Title = "Analisi Instagram";
             View!.BackgroundColor = UIColor.White;
+            EdgesForExtendedLayout = UIRectEdge.None;
+            NavigationController?.NavigationBar.Hidden = true;
+            NavigationItem.HidesBackButton = true;
 
-            // Setup navigation - remove Done button since we're in a navigation controller
-            NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
-                UIBarButtonSystemItem.Done,
-                (_, _) => NavigationController?.PopViewController(true));
-
-            // Setup import button
-            _importButton = UIButton.FromType(UIButtonType.System);
-            _importButton.SetTitle("Importa dati", UIControlState.Normal);
-            _importButton.TitleLabel!.Font = UIFont.SystemFontOfSize(16, UIFontWeight.Semibold);
-            _importButton.SetTitleColor(UIColor.FromRGB(10, 132, 255), UIControlState.Normal);
-            _importButton.TouchUpInside += (_, _) => PickDataFile();
-
-            // Setup segment control for switching between lists
-            _segmentControl = new UISegmentedControl(new[] { "Followers", "Seguiti", "Non mi seguono" })
-            {
-                SelectedSegment = 0,
-                Enabled = false
-            };
-            _segmentControl.ValueChanged += (_, _) => OnSegmentChanged();
-
-            // Create header view with proper spacing from navigation bar
-            var headerView = new UIView
-            {
-                BackgroundColor = UIColor.FromRGB(240, 240, 240),
-                TranslatesAutoresizingMaskIntoConstraints = false
-            };
-
-            headerView.AddSubview(_importButton);
-            headerView.AddSubview(_segmentControl);
-
-            View.AddSubview(headerView);
-
-            // Setup constraints for header
-            _importButton.TranslatesAutoresizingMaskIntoConstraints = false;
-            _segmentControl.TranslatesAutoresizingMaskIntoConstraints = false;
-
-            NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
-            {
-                headerView.TopAnchor.ConstraintEqualTo(View.SafeAreaLayoutGuide.TopAnchor),
-                headerView.LeadingAnchor.ConstraintEqualTo(View.LeadingAnchor),
-                headerView.TrailingAnchor.ConstraintEqualTo(View.TrailingAnchor),
-                headerView.HeightAnchor.ConstraintEqualTo(90),
-
-                _importButton.TopAnchor.ConstraintEqualTo(headerView.TopAnchor, 8),
-                _importButton.LeadingAnchor.ConstraintEqualTo(headerView.LeadingAnchor, 10),
-                _importButton.TrailingAnchor.ConstraintEqualTo(headerView.TrailingAnchor, -10),
-                _importButton.HeightAnchor.ConstraintEqualTo(36),
-
-                _segmentControl.TopAnchor.ConstraintEqualTo(_importButton.BottomAnchor, 6),
-                _segmentControl.LeadingAnchor.ConstraintEqualTo(headerView.LeadingAnchor, 10),
-                _segmentControl.TrailingAnchor.ConstraintEqualTo(headerView.TrailingAnchor, -10),
-                _segmentControl.HeightAnchor.ConstraintEqualTo(34)
-            });
+            // Setup bottom tab bar
+            SetupBottomTabBar();
 
             // Setup table view with optimizations for large datasets
             _tableView = new UITableView(CGRect.Empty, UITableViewStyle.Plain)
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 Delegate = new InstagramTableDelegate(),
-                DataSource = new InstagramTableSource(_followers),
+                DataSource = new InstagramTableSource(_currentList),
                 Hidden = true,
-                EstimatedRowHeight = 60,
-                RowHeight = UITableView.AutomaticDimension
+                EstimatedRowHeight = 54,
+                RowHeight = 54,
+                SeparatorStyle = UITableViewCellSeparatorStyle.SingleLine,
+                SeparatorInset = UIEdgeInsets.Zero,
+                PrefetchingEnabled = true
             };
             _tableView.RegisterClassForCellReuse(typeof(InstagramUserCell), InstagramUserCell.CellId);
-            _tableView.SeparatorStyle = UITableViewCellSeparatorStyle.SingleLine;
-            _tableView.SeparatorInset = UIEdgeInsets.Zero;
             View.AddSubview(_tableView);
 
             NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
             {
-                _tableView.TopAnchor.ConstraintEqualTo(headerView.BottomAnchor),
+                _tableView.TopAnchor.ConstraintEqualTo(View.SafeAreaLayoutGuide.TopAnchor, 8),
                 _tableView.LeadingAnchor.ConstraintEqualTo(View.LeadingAnchor),
                 _tableView.TrailingAnchor.ConstraintEqualTo(View.TrailingAnchor),
-                _tableView.BottomAnchor.ConstraintEqualTo(View.BottomAnchor)
+                _tableView.BottomAnchor.ConstraintEqualTo(_bottomTabBar!.TopAnchor)
             });
 
             // Setup empty label
@@ -119,10 +78,10 @@ namespace vault.iOS
 
             NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
             {
-                _emptyLabel.TopAnchor.ConstraintEqualTo(headerView.BottomAnchor),
+                _emptyLabel.TopAnchor.ConstraintEqualTo(View.SafeAreaLayoutGuide.TopAnchor, 8),
                 _emptyLabel.LeadingAnchor.ConstraintEqualTo(View.LeadingAnchor),
                 _emptyLabel.TrailingAnchor.ConstraintEqualTo(View.TrailingAnchor),
-                _emptyLabel.BottomAnchor.ConstraintEqualTo(View.BottomAnchor)
+                _emptyLabel.BottomAnchor.ConstraintEqualTo(_bottomTabBar!.TopAnchor)
             });
 
             // Setup loading indicator
@@ -138,6 +97,111 @@ namespace vault.iOS
                 _loadingIndicator.CenterXAnchor.ConstraintEqualTo(View.CenterXAnchor),
                 _loadingIndicator.CenterYAnchor.ConstraintEqualTo(View.CenterYAnchor)
             });
+        }
+
+        private void SetupBottomTabBar()
+        {
+            _homeTabItem = new UITabBarItem("Home", UIImage.GetSystemImage("house"), 0);
+            _importTabItem = new UITabBarItem("Importa", UIImage.GetSystemImage("square.and.arrow.down"), 1);
+            _followersTabItem = new UITabBarItem("Followers", UIImage.GetSystemImage("person.2"), 2);
+            _followingTabItem = new UITabBarItem("Seguiti", UIImage.GetSystemImage("heart"), 3);
+            _notFollowingBackTabItem = new UITabBarItem("Non ricambia", UIImage.GetSystemImage("person.badge.xmark"), 4);
+
+            _bottomTabBar = new UITabBar
+            {
+                Translucent = false,
+                BarTintColor = UIColor.FromRGB(249, 249, 252),
+                TintColor = UIColor.FromRGB(10, 132, 255),
+                Items = new[]
+                {
+                    _homeTabItem,
+                    _importTabItem,
+                    _followersTabItem,
+                    _followingTabItem,
+                    _notFollowingBackTabItem
+                }
+            };
+
+            _bottomTabBar.ItemSelected += OnTabBarItemSelected;
+            _bottomTabBar.TranslatesAutoresizingMaskIntoConstraints = false;
+            View.AddSubview(_bottomTabBar);
+
+            NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
+            {
+                _bottomTabBar.LeadingAnchor.ConstraintEqualTo(View.LeadingAnchor),
+                _bottomTabBar.TrailingAnchor.ConstraintEqualTo(View.TrailingAnchor),
+                _bottomTabBar.BottomAnchor.ConstraintEqualTo(View.SafeAreaLayoutGuide.BottomAnchor),
+                _bottomTabBar.HeightAnchor.ConstraintEqualTo(50)
+            });
+        }
+
+        private void OnTabBarItemSelected(object? sender, UITabBarItemEventArgs args)
+        {
+            if (_bottomTabBar != null)
+                _bottomTabBar.SelectedItem = null;
+
+            if (args.Item == null)
+                return;
+
+            if (ReferenceEquals(args.Item, _homeTabItem))
+            {
+                GoBackToHome();
+                return;
+            }
+
+            if (ReferenceEquals(args.Item, _importTabItem))
+            {
+                PickDataFile();
+                return;
+            }
+
+            if (_followers.Count == 0 && _following.Count == 0)
+            {
+                ShowNotification("Nessun dato", "Importa prima i dati di Instagram.");
+                return;
+            }
+
+            if (ReferenceEquals(args.Item, _followersTabItem))
+            {
+                UpdateList(_followers);
+            }
+            else if (ReferenceEquals(args.Item, _followingTabItem))
+            {
+                UpdateList(_following);
+            }
+            else if (ReferenceEquals(args.Item, _notFollowingBackTabItem))
+            {
+                UpdateList(_notFollowingBack);
+            }
+        }
+
+        private void UpdateList(List<InstagramAnalysisService.InstagramUser> newList)
+        {
+            _currentList.Clear();
+            _currentList.AddRange(newList);
+
+            if (_tableView?.DataSource is InstagramTableSource dataSource)
+            {
+                dataSource.UpdateUsers(_currentList);
+            }
+
+            _tableView?.ReloadData();
+            if (_tableView != null && _currentList.Count > 0)
+            {
+                _tableView.ScrollToRow(NSIndexPath.FromRowSection(0, 0), UITableViewScrollPosition.Top, false);
+            }
+        }
+
+        private void GoBackToHome()
+        {
+            if (NavigationController != null && NavigationController.ViewControllers.Length > 1)
+            {
+                NavigationController.PopViewController(true);
+            }
+            else
+            {
+                DismissViewController(true, null);
+            }
         }
 
         private void PickDataFile()
@@ -196,10 +260,10 @@ namespace vault.iOS
 
                     if (_followers.Count > 0 || _following.Count > 0)
                     {
-                        _segmentControl!.Enabled = true;
                         _emptyLabel!.Hidden = true;
                         _tableView!.Hidden = false;
-                        OnSegmentChanged();
+                        // Show followers by default
+                        UpdateList(_followers);
                     }
                     else
                     {
@@ -216,37 +280,6 @@ namespace vault.iOS
                     ShowNotification("Errore", $"Si è verificato un errore: {ex.Message}");
                 });
             }
-        }
-
-        private void OnSegmentChanged()
-        {
-            if (_segmentControl == null || _tableView == null)
-                return;
-
-            // Assign the appropriate list directly instead of modifying the existing one
-            List<InstagramAnalysisService.InstagramUser> newList;
-            switch (_segmentControl.SelectedSegment)
-            {
-                case 0: // Followers
-                    newList = _followers;
-                    break;
-                case 1: // Following
-                    newList = _following;
-                    break;
-                case 2: // Not following back
-                    newList = _notFollowingBack;
-                    break;
-                default:
-                    return;
-            }
-
-            // Update the data source with the new list
-            if (_tableView.DataSource is InstagramTableSource dataSource)
-            {
-                dataSource.UpdateUsers(newList);
-            }
-
-            _tableView.ReloadData();
         }
 
         private void ShowNotification(string title, string message)
@@ -277,7 +310,10 @@ namespace vault.iOS
             _usernameLabel = new UILabel
             {
                 Font = UIFont.SystemFontOfSize(16, UIFontWeight.Medium),
-                TextColor = UIColor.Black
+                TextColor = UIColor.Black,
+                Lines = 1,
+                LineBreakMode = UILineBreakMode.TailTruncation,
+                AdjustsFontSizeToFitWidth = false
             };
             ContentView.AddSubview(_usernameLabel);
 
@@ -308,7 +344,7 @@ namespace vault.iOS
             base.LayoutSubviews();
 
             nfloat padding = 16;
-            nfloat linkButtonSize = 44;
+            nfloat linkButtonSize = 40;
 
             _linkButton!.Frame = new CGRect(
                 ContentView.Bounds.Width - linkButtonSize - padding,
