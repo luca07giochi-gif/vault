@@ -26,6 +26,7 @@ namespace vault.iOS
 
         private InstagramAnalysisService _analysisService = new();
         private UIDocumentPickerViewController? _documentPicker;
+        private InstagramListDataSource? _tableSource;
 
         public override void ViewDidLoad()
         {
@@ -40,23 +41,22 @@ namespace vault.iOS
             }
             NavigationItem.HidesBackButton = true;
 
-            // Setup bottom tab bar
             SetupBottomTabBar();
 
-            // Setup table view with optimizations for large datasets
             _tableView = new UITableView(CGRect.Empty, UITableViewStyle.Plain)
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
-                Delegate = new InstagramTableDelegate(),
-                DataSource = new InstagramTableSource(_currentList),
                 Hidden = true,
-                EstimatedRowHeight = 54,
-                RowHeight = 54,
+                EstimatedRowHeight = 56,
+                RowHeight = 56,
                 SeparatorStyle = UITableViewCellSeparatorStyle.SingleLine,
                 SeparatorInset = UIEdgeInsets.Zero,
-                PrefetchingEnabled = true
+                BackgroundColor = UIColor.White
             };
-            _tableView.RegisterClassForCellReuse(typeof(InstagramUserCell), InstagramUserCell.CellId);
+
+            _tableSource = new InstagramListDataSource(_currentList);
+            _tableView.DataSource = _tableSource;
+            _tableView.Delegate = new InstagramListDelegate(this);
             View.AddSubview(_tableView);
 
             NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
@@ -67,7 +67,6 @@ namespace vault.iOS
                 _tableView.BottomAnchor.ConstraintEqualTo(_bottomTabBar!.TopAnchor)
             });
 
-            // Setup empty label
             _emptyLabel = new UILabel
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
@@ -87,7 +86,6 @@ namespace vault.iOS
                 _emptyLabel.BottomAnchor.ConstraintEqualTo(_bottomTabBar!.TopAnchor)
             });
 
-            // Setup loading indicator
             _loadingIndicator = new UIActivityIndicatorView(UIActivityIndicatorViewStyle.Large)
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
@@ -183,15 +181,12 @@ namespace vault.iOS
             _currentList.Clear();
             _currentList.AddRange(newList);
 
-            if (_tableView?.DataSource is InstagramTableSource dataSource)
-            {
-                dataSource.UpdateUsers(_currentList);
-            }
-
+            _tableSource?.UpdateUsers(_currentList);
             _tableView?.ReloadData();
+
             if (_tableView != null && _currentList.Count > 0)
             {
-                _tableView.ScrollToRow(NSIndexPath.FromRowSection(0, 0), UITableViewScrollPosition.Top, false);
+                _tableView.SetContentOffset(CGPoint.Empty, false);
             }
         }
 
@@ -237,7 +232,6 @@ namespace vault.iOS
         [Export("documentPickerWasCancelled:")]
         public void DocumentPickerWasCancelled(UIDocumentPickerViewController controller)
         {
-            // User cancelled
         }
 
         private async System.Threading.Tasks.Task ProcessInstagramDataAsync(NSUrl fileUrl)
@@ -265,11 +259,12 @@ namespace vault.iOS
                     {
                         _emptyLabel!.Hidden = true;
                         _tableView!.Hidden = false;
-                        // Show followers by default
                         UpdateList(_followers);
                     }
                     else
                     {
+                        _emptyLabel!.Hidden = false;
+                        _tableView!.Hidden = true;
                         ShowNotification("Nessun dato trovato", "Non sono stati trovati dati Instagram validi nel file selezionato.");
                     }
                 });
@@ -291,103 +286,63 @@ namespace vault.iOS
             alert.AddAction(UIAlertAction.Create("OK", UIAlertActionStyle.Default, null));
             PresentViewController(alert, true, null);
         }
-    }
 
-    // Table view cell for Instagram users
-    public sealed class InstagramUserCell : UITableViewCell
-    {
-        public const string CellId = "InstagramUserCell";
-        private UILabel? _usernameLabel;
-        private UIButton? _linkButton;
-
-        public InstagramUserCell(IntPtr handle) : base(handle)
+        private void OpenInstagramProfile(string? username)
         {
-            Initialize();
-        }
+            if (string.IsNullOrWhiteSpace(username))
+                return;
 
-        private void Initialize()
-        {
-            SelectionStyle = UITableViewCellSelectionStyle.None;
-            BackgroundColor = UIColor.White;
-
-            _usernameLabel = new UILabel
-            {
-                Font = UIFont.SystemFontOfSize(16, UIFontWeight.Medium),
-                TextColor = UIColor.Black,
-                Lines = 1,
-                LineBreakMode = UILineBreakMode.TailTruncation,
-                AdjustsFontSizeToFitWidth = false
-            };
-            ContentView.AddSubview(_usernameLabel);
-
-            _linkButton = UIButton.FromType(UIButtonType.System);
-            _linkButton.SetTitle("🔗", UIControlState.Normal);
-            _linkButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18);
-            ContentView.AddSubview(_linkButton);
-        }
-
-        public void Configure(InstagramAnalysisService.InstagramUser user)
-        {
-            _usernameLabel!.Text = user.Username;
-
-            _linkButton?.RemoveTarget(null, UIControlEvent.AllEvents);
-            _linkButton?.AddTarget((_, _) =>
-            {
-                if (!string.IsNullOrWhiteSpace(user.InstagramUrl))
-                {
+            string url = $"https://www.instagram.com/{username}/";
 #pragma warning disable CA1422
-                    UIApplication.SharedApplication.OpenUrl(new NSUrl(user.InstagramUrl), new UIApplicationOpenUrlOptions(), null);
+            UIApplication.SharedApplication.OpenUrl(new NSUrl(url), new UIApplicationOpenUrlOptions(), null);
 #pragma warning restore CA1422
-                }
-            }, UIControlEvent.TouchUpInside);
         }
 
-        public override void LayoutSubviews()
+        private sealed class InstagramListDelegate : UITableViewDelegate
         {
-            base.LayoutSubviews();
+            private readonly InstagramAnalysisViewController _owner;
 
-            nfloat padding = 16;
-            nfloat linkButtonSize = 40;
+            public InstagramListDelegate(InstagramAnalysisViewController owner)
+            {
+                _owner = owner;
+            }
 
-            _linkButton!.Frame = new CGRect(
-                ContentView.Bounds.Width - linkButtonSize - padding,
-                (ContentView.Bounds.Height - linkButtonSize) / 2,
-                linkButtonSize,
-                linkButtonSize);
+            public override void RowSelected(UITableView tableView, NSIndexPath indexPath)
+            {
+                if (indexPath.Row >= 0 && indexPath.Row < _owner._currentList.Count)
+                {
+                    _owner.OpenInstagramProfile(_owner._currentList[indexPath.Row].Username);
+                }
 
-            _usernameLabel!.Frame = new CGRect(
-                padding,
-                0,
-                ContentView.Bounds.Width - linkButtonSize - (padding * 2),
-                ContentView.Bounds.Height);
+                tableView.DeselectRow(indexPath, true);
+            }
         }
     }
 
-    // Table view data source
-    public class InstagramTableSource : UITableViewDataSource
+    public class InstagramListDataSource : UITableViewDataSource
     {
-        private List<InstagramAnalysisService.InstagramUser> _users;
+        private readonly List<InstagramAnalysisService.InstagramUser> _users = new();
 
-        public InstagramTableSource(List<InstagramAnalysisService.InstagramUser> users)
+        public InstagramListDataSource(List<InstagramAnalysisService.InstagramUser> users)
         {
-            _users = users;
+            _users.AddRange(users);
         }
 
         public void UpdateUsers(List<InstagramAnalysisService.InstagramUser> users)
         {
-            _users = users;
+            _users.Clear();
+            _users.AddRange(users);
         }
 
         public override UITableViewCell GetCell(UITableView tableView, NSIndexPath indexPath)
         {
-            var cell = tableView.DequeueReusableCell(InstagramUserCell.CellId, indexPath) as InstagramUserCell
-                ?? new InstagramUserCell(IntPtr.Zero);
-
-            if (indexPath.Row < _users.Count)
-            {
-                cell.Configure(_users[indexPath.Row]);
-            }
-
+            const string cellId = "InstagramSimpleCell";
+            var cell = tableView.DequeueReusableCell(cellId) ?? new UITableViewCell(UITableViewCellStyle.Default, cellId);
+            cell.TextLabel!.Text = indexPath.Row < _users.Count ? _users[indexPath.Row].Username : string.Empty;
+            cell.TextLabel.Font = UIFont.SystemFontOfSize(16, UIFontWeight.Medium);
+            cell.SelectionStyle = UITableViewCellSelectionStyle.Default;
+            cell.Accessory = UITableViewCellAccessory.None;
+            cell.BackgroundColor = UIColor.White;
             return cell;
         }
 
@@ -400,11 +355,5 @@ namespace vault.iOS
         {
             return 1;
         }
-    }
-
-    // Table view delegate
-    public class InstagramTableDelegate : UITableViewDelegate
-    {
-        // Remove GetHeightForRow to use automatic row height estimation
     }
 }
