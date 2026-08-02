@@ -17,7 +17,6 @@ namespace vault.iOS
         private List<InstagramAnalysisService.InstagramUser> _followers = new();
         private List<InstagramAnalysisService.InstagramUser> _following = new();
         private List<InstagramAnalysisService.InstagramUser> _notFollowingBack = new();
-        private List<InstagramAnalysisService.InstagramUser> _currentList = new();
         
         private InstagramAnalysisService _analysisService = new();
         private UIDocumentPickerViewController? _documentPicker;
@@ -83,16 +82,19 @@ namespace vault.iOS
                 _segmentControl.HeightAnchor.ConstraintEqualTo(34)
             });
 
-            // Setup table view
+            // Setup table view with optimizations for large datasets
             _tableView = new UITableView(CGRect.Empty, UITableViewStyle.Plain)
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 Delegate = new InstagramTableDelegate(),
-                DataSource = new InstagramTableSource(_currentList),
-                Hidden = true
+                DataSource = new InstagramTableSource(_followers),
+                Hidden = true,
+                EstimatedRowHeight = 60,
+                RowHeight = UITableView.AutomaticDimension
             };
             _tableView.RegisterClassForCellReuse(typeof(InstagramUserCell), InstagramUserCell.CellId);
-            _tableView.RowHeight = 60;
+            _tableView.SeparatorStyle = UITableViewCellSeparatorStyle.SingleLine;
+            _tableView.SeparatorInset = UIEdgeInsets.Zero;
             View.AddSubview(_tableView);
 
             NSLayoutConstraint.ActivateConstraints(new NSLayoutConstraint[]
@@ -221,19 +223,27 @@ namespace vault.iOS
             if (_segmentControl == null || _tableView == null)
                 return;
 
-            _currentList.Clear();
-
+            // Assign the appropriate list directly instead of modifying the existing one
+            List<InstagramAnalysisService.InstagramUser> newList;
             switch (_segmentControl.SelectedSegment)
             {
                 case 0: // Followers
-                    _currentList.AddRange(_followers);
+                    newList = _followers;
                     break;
                 case 1: // Following
-                    _currentList.AddRange(_following);
+                    newList = _following;
                     break;
                 case 2: // Not following back
-                    _currentList.AddRange(_notFollowingBack);
+                    newList = _notFollowingBack;
                     break;
+                default:
+                    return;
+            }
+
+            // Update the data source with the new list
+            if (_tableView.DataSource is InstagramTableSource dataSource)
+            {
+                dataSource.UpdateUsers(newList);
             }
 
             _tableView.ReloadData();
@@ -317,9 +327,14 @@ namespace vault.iOS
     // Table view data source
     public class InstagramTableSource : UITableViewDataSource
     {
-        private readonly List<InstagramAnalysisService.InstagramUser> _users;
+        private List<InstagramAnalysisService.InstagramUser> _users;
 
         public InstagramTableSource(List<InstagramAnalysisService.InstagramUser> users)
+        {
+            _users = users;
+        }
+
+        public void UpdateUsers(List<InstagramAnalysisService.InstagramUser> users)
         {
             _users = users;
         }
@@ -351,9 +366,6 @@ namespace vault.iOS
     // Table view delegate
     public class InstagramTableDelegate : UITableViewDelegate
     {
-        public override nfloat GetHeightForRow(UITableView tableView, NSIndexPath indexPath)
-        {
-            return 60;
-        }
+        // Remove GetHeightForRow to use automatic row height estimation
     }
 }

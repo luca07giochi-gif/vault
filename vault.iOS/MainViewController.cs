@@ -34,7 +34,6 @@ namespace vault.iOS
         private const string ItemSortNameAscendingValue = "name_asc";
         private const string ItemSortNameDescendingValue = "name_desc";
         private const string ItemSortLatestAddedValue = "latest_added";
-        private const string AutoOpenVaultPreferenceKey = "vault.ios.auto.open.vault";
         private const int ThumbnailCacheLimit = 36;
         private const int ThumbnailDiskCacheFileLimit = 260;
         private const int ThumbnailPrefetchPadding = 8;
@@ -141,7 +140,6 @@ namespace vault.iOS
         private CancellationTokenSource? _pendingImportPromptCts;
         private bool _manualSaveModeEnabled;
         private NSUrl? _pendingIncomingVaultUrl;
-        private string? _autoOpenVaultPath;
 
         private bool HasPendingVaultSaveChanges =>
             _session != null && (_session.IsDirty || _session.NeedsVaultIdUpgrade);
@@ -203,11 +201,6 @@ namespace vault.iOS
             _itemSortMode = mode;
         }
 
-        private void LoadAutoOpenVaultPreference()
-        {
-            _autoOpenVaultPath = NSUserDefaults.StandardUserDefaults.StringForKey(AutoOpenVaultPreferenceKey);
-        }
-
         private void ApplyPreviewPerformanceMode(PreviewPerformanceMode mode, bool persist)
         {
             _previewPerformanceMode = mode;
@@ -260,7 +253,6 @@ namespace vault.iOS
 
             LoadPreviewPerformancePreference();
             LoadItemSortPreference();
-            LoadAutoOpenVaultPreference();
 
             View!.BackgroundColor = UIColor.White;
 
@@ -368,17 +360,6 @@ namespace vault.iOS
                 _pendingIncomingVaultUrl = null;
                 PromptPasswordAndOpenVault(pendingUrl);
                 return;
-            }
-
-            // Auto-open vault if configured and no session is active
-            if (_session == null && !string.IsNullOrWhiteSpace(_autoOpenVaultPath) && File.Exists(_autoOpenVaultPath))
-            {
-                NSUrl autoOpenUrl = NSUrl.FromFilename(_autoOpenVaultPath);
-                if (autoOpenUrl != null)
-                {
-                    PromptPasswordAndOpenVault(autoOpenUrl);
-                    return;
-                }
             }
 
             if (_session != null)
@@ -2287,16 +2268,6 @@ namespace vault.iOS
                 recentVaults.Count > 0 ? $"{recentVaults.Count} vault disponibili" : "Nessun vault disponibile",
                 UIAlertControllerStyle.Alert);
 
-            // Add option to disable auto-open vault if one is set
-            if (!string.IsNullOrWhiteSpace(_autoOpenVaultPath))
-            {
-                string autoOpenVaultName = Path.GetFileName(_autoOpenVaultPath);
-                alert.AddAction(UIAlertAction.Create(
-                    $"Disabilita apertura automatica: {autoOpenVaultName}",
-                    UIAlertActionStyle.Default,
-                    _ => ClearAutoOpenVault()));
-            }
-
             if (recentVaults.Count > 0)
             {
                 foreach (RecentVaultRecord vault in recentVaults)
@@ -2315,15 +2286,6 @@ namespace vault.iOS
             alert.AddAction(UIAlertAction.Create("Chiudi", UIAlertActionStyle.Cancel, null));
 
             PresentViewController(alert, true, null);
-        }
-
-        private void ClearAutoOpenVault()
-        {
-            _autoOpenVaultPath = null;
-            NSUserDefaults defaults = NSUserDefaults.StandardUserDefaults;
-            defaults.RemoveObject(AutoOpenVaultPreferenceKey);
-            defaults.Synchronize();
-            ShowSimpleAlert("Apertura automatica disabilitata", "Il vault non verrà più aperto automaticamente all'avvio dell'app.");
         }
 
         private void PromptVaultActions(RecentVaultRecord vault)
@@ -3437,7 +3399,7 @@ namespace vault.iOS
 
             if (!header.RequiresPassword)
             {
-                PromptAutoOpenVault(vaultUrl, vaultPath, string.Empty, header);
+                _ = OpenVaultAsync(vaultUrl, string.Empty, header);
                 return;
             }
 
@@ -3460,43 +3422,10 @@ namespace vault.iOS
             prompt.AddAction(UIAlertAction.Create("Apri", UIAlertActionStyle.Default, __ =>
             {
                 string password = prompt.TextFields?.FirstOrDefault()?.Text ?? string.Empty;
-                PromptAutoOpenVault(vaultUrl, vaultPath, password, header);
+                _ = OpenVaultAsync(vaultUrl, password, header);
             }));
 
             PresentViewController(prompt, true, null);
-        }
-
-        private void PromptAutoOpenVault(NSUrl vaultUrl, string vaultPath, string password, VaultFileFormat.Header? knownHeader = null)
-        {
-            // Check if this is already the auto-open vault
-            if (string.Equals(vaultPath, _autoOpenVaultPath, StringComparison.OrdinalIgnoreCase))
-            {
-                _ = OpenVaultAsync(vaultUrl, password, knownHeader);
-                return;
-            }
-
-            UIAlertController alert = UIAlertController.Create(
-                "Apertura automatica",
-                $"Vuoi aprire sempre questo vault ({Path.GetFileName(vaultPath)}) all'avvio dell'app?",
-                UIAlertControllerStyle.Alert);
-
-            alert.AddAction(UIAlertAction.Create("No", UIAlertActionStyle.Default, __ =>
-            {
-                _ = OpenVaultAsync(vaultUrl, password, knownHeader);
-            }));
-
-            alert.AddAction(UIAlertAction.Create("Sì", UIAlertActionStyle.Default, __ =>
-            {
-                // Save the auto-open vault preference
-                _autoOpenVaultPath = vaultPath;
-                NSUserDefaults defaults = NSUserDefaults.StandardUserDefaults;
-                defaults.SetString(vaultPath, AutoOpenVaultPreferenceKey);
-                defaults.Synchronize();
-
-                _ = OpenVaultAsync(vaultUrl, password, knownHeader);
-            }));
-
-            PresentViewController(alert, true, null);
         }
 
         private async Task OpenVaultAsync(NSUrl vaultUrl, string password, VaultFileFormat.Header? knownHeader = null)
