@@ -495,6 +495,11 @@ namespace vault.iOS
             _collectionView?.ReloadData();
         }
 
+        private void SetupBottomMenu()
+        {
+            SetupBottomTabBar();
+        }
+
         private void SetupBottomTabBar()
         {
             _vaultTabItem = new UITabBarItem("Sposta", UIImage.GetSystemImage("arrowshape.turn.up.right"), 0);

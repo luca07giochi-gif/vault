@@ -34,7 +34,10 @@ namespace vault.iOS
             Title = "Analisi Instagram";
             View!.BackgroundColor = UIColor.White;
             EdgesForExtendedLayout = UIRectEdge.None;
-            NavigationController?.NavigationBar.Hidden = true;
+            if (NavigationController != null)
+            {
+                NavigationController.NavigationBar.Hidden = true;
+            }
             NavigationItem.HidesBackButton = true;
 
             // Setup bottom tab bar
