@@ -85,21 +85,28 @@ namespace vault.iOS
 
             try
             {
-                // Extract usernames from Instagram hrefs
-                var pattern = new Regex(@"https?://(?:www\.)?instagram\.com/([A-Za-z0-9._]+)", RegexOptions.IgnoreCase);
-                var matches = pattern.Matches(htmlContent);
-
                 var usernameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (Match match in matches)
+
+                foreach (var username in ExtractUsernamesFromAnchors(htmlContent))
                 {
-                    string username = match.Groups[1].Value;
-                    if (!string.IsNullOrWhiteSpace(username) && IsValidInstagramUsername(username))
+                    if (IsValidInstagramUsername(username))
                     {
                         usernameSet.Add(username);
                     }
                 }
 
-                foreach (var username in usernameSet.OrderBy(u => u))
+                if (usernameSet.Count == 0)
+                {
+                    foreach (var username in ExtractUsernamesFromText(htmlContent))
+                    {
+                        if (IsValidInstagramUsername(username))
+                        {
+                            usernameSet.Add(username);
+                        }
+                    }
+                }
+
+                foreach (var username in usernameSet.OrderBy(u => u, StringComparer.OrdinalIgnoreCase))
                 {
                     users.Add(new InstagramUser { Username = username });
                 }
@@ -112,12 +119,101 @@ namespace vault.iOS
             return users;
         }
 
+        private IEnumerable<string> ExtractUsernamesFromAnchors(string htmlContent)
+        {
+            var hrefRegex = new Regex(@"<a[^>]+href=""(?<href>[^""]+)""", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            var matches = hrefRegex.Matches(htmlContent);
+
+            foreach (Match match in matches)
+            {
+                var href = match.Groups["href"].Value?.Trim();
+                if (string.IsNullOrWhiteSpace(href))
+                    continue;
+
+                var normalizedHref = href.Split('?', 2)[0].Split('#', 2)[0];
+                if (!normalizedHref.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                    !normalizedHref.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                if (!normalizedHref.Contains("instagram.com", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                string path;
+                try
+                {
+                    path = new Uri(normalizedHref).AbsolutePath;
+                }
+                catch
+                {
+                    path = normalizedHref;
+                }
+
+                path = path.Trim('/');
+                if (path.StartsWith("_u/", StringComparison.OrdinalIgnoreCase))
+                {
+                    path = path.Substring(3);
+                }
+
+                path = path.Split('/', 2)[0].Trim();
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+
+                yield return path;
+            }
+        }
+
+        private IEnumerable<string> ExtractUsernamesFromText(string htmlContent)
+        {
+            var cleaned = Regex.Replace(htmlContent, "<[^>]+>", " ", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+            cleaned = Regex.Replace(cleaned, "&nbsp;", " ", RegexOptions.IgnoreCase);
+            cleaned = Regex.Replace(cleaned, "\\s+", "\n", RegexOptions.Multiline);
+
+            var headerLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "followers",
+                "following",
+                "follower",
+                "seguaci",
+                "seguiti",
+                "seguito",
+                "segui"
+            };
+
+            foreach (var line in cleaned.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var value = line.Trim();
+                if (string.IsNullOrWhiteSpace(value))
+                    continue;
+
+                if (headerLabels.Contains(value))
+                    continue;
+
+                if (value.Equals("profiles you choose to see content from", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (IsValidInstagramUsername(value))
+                {
+                    yield return value;
+                }
+            }
+        }
+
         private bool IsValidInstagramUsername(string username)
         {
             if (string.IsNullOrWhiteSpace(username))
                 return false;
 
-            // Instagram usernames can contain letters, numbers, periods, and underscores
+            if (username.Equals("_u", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (username.Contains("/", StringComparison.Ordinal))
+                return false;
+
+            if (username.Contains("?", StringComparison.Ordinal) || username.Contains("#", StringComparison.Ordinal))
+                return false;
+
             return username.All(c => char.IsLetterOrDigit(c) || c == '.' || c == '_');
         }
     }

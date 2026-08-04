@@ -100,6 +100,22 @@ namespace vault.iOS
             });
         }
 
+        public override void ViewWillAppear(bool animated)
+        {
+            base.ViewWillAppear(animated);
+            NavigationController?.SetNavigationBarHidden(true, animated);
+        }
+
+        public override void ViewWillDisappear(bool animated)
+        {
+            if (NavigationController != null)
+            {
+                NavigationController.SetNavigationBarHidden(false, animated);
+            }
+
+            base.ViewWillDisappear(animated);
+        }
+
         private void SetupBottomTabBar()
         {
             _homeTabItem = new UITabBarItem("Home", UIImage.GetSystemImage("house"), 0);
@@ -338,11 +354,30 @@ namespace vault.iOS
         {
             const string cellId = "InstagramSimpleCell";
             var cell = tableView.DequeueReusableCell(cellId) ?? new UITableViewCell(UITableViewCellStyle.Default, cellId);
-            cell.TextLabel!.Text = indexPath.Row < _users.Count ? _users[indexPath.Row].Username : string.Empty;
+            string username = indexPath.Row < _users.Count ? _users[indexPath.Row].Username : string.Empty;
+            cell.TextLabel!.Text = username;
             cell.TextLabel.Font = UIFont.SystemFontOfSize(16, UIFontWeight.Medium);
             cell.SelectionStyle = UITableViewCellSelectionStyle.Default;
-            cell.Accessory = UITableViewCellAccessory.None;
             cell.BackgroundColor = UIColor.White;
+
+            var linkButton = new UIButton(UIButtonType.System)
+            {
+                Frame = new CGRect(0, 0, 32, 32)
+            };
+            linkButton.SetImage(UIImage.GetSystemImage("link"), UIControlState.Normal);
+            linkButton.TintColor = UIColor.FromRGB(10, 132, 255);
+            linkButton.TouchUpInside += (_, _) =>
+            {
+                if (!string.IsNullOrWhiteSpace(username))
+                {
+#pragma warning disable CA1422
+                    UIApplication.SharedApplication.OpenUrl(new NSUrl($"https://www.instagram.com/{username}/?hl=it"), new UIApplicationOpenUrlOptions(), null);
+#pragma warning restore CA1422
+                }
+            };
+
+            cell.Accessory = UITableViewCellAccessory.None;
+            cell.AccessoryView = linkButton;
             return cell;
         }
 
