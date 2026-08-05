@@ -30,6 +30,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Notifica Avvio su Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+               -d chat_id="$TELEGRAM_TO" \
+               -d text="⏳ Build iOS avviata su GitHub Actions..."
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
@@ -250,5 +259,15 @@ jobs:
         run: |
           curl -v -F chat_id="$TELEGRAM_TO" \
                -F document=@"$IPA_PATH" \
-               -F caption="📱 Nuovo file .ipa generato!" \
+               -F caption="✅ Build completata! Ecco il file .ipa" \
                "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument"
+
+      - name: Notifica Errore su Telegram (Fallimento)
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+               -d chat_id="$TELEGRAM_TO" \
+               -d text="❌ Errore! La build iOS su GitHub Actions è fallita. Controlla i log della repository."
