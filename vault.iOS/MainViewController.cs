@@ -253,7 +253,7 @@ namespace vault.iOS
             LoadPreviewPerformancePreference();
             LoadItemSortPreference();
 
-            View!.BackgroundColor = UIColor.White;
+            View!.BackgroundColor = UIColor.SystemBackground;
 
             _tableView = new UITableView(View.Bounds, UITableViewStyle.InsetGrouped)
             {
@@ -298,7 +298,7 @@ namespace vault.iOS
                 TextAlignment = UITextAlignment.Center,
                 Lines = 0,
                 Font = UIFont.SystemFontOfSize(16),
-                TextColor = UIColor.DarkGray,
+                TextColor = UIColor.SecondaryLabel,
                 Text = "Tocca \"Apri vault\" per selezionare un file .vault.",
                 Hidden = false
             };
@@ -307,7 +307,7 @@ namespace vault.iOS
             _openVaultCenteredButton = new UIButton(UIButtonType.System);
             _openVaultCenteredButton.SetTitle("Apri vault", UIControlState.Normal);
             _openVaultCenteredButton.SetTitleColor(UIColor.White, UIControlState.Normal);
-            _openVaultCenteredButton.BackgroundColor = UIColor.FromRGB(10, 132, 255);
+            _openVaultCenteredButton.BackgroundColor = UIColor.SystemBlue;
             _openVaultCenteredButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
             _openVaultCenteredButton.Layer.CornerRadius = 13f;
             _openVaultCenteredButton.TouchUpInside += (_, _) => _ = PickVaultToOpenAsync();
@@ -316,7 +316,7 @@ namespace vault.iOS
             _createVaultCenteredButton = new UIButton(UIButtonType.System);
             _createVaultCenteredButton.SetTitle("Crea vault", UIControlState.Normal);
             _createVaultCenteredButton.SetTitleColor(UIColor.White, UIControlState.Normal);
-            _createVaultCenteredButton.BackgroundColor = UIColor.FromRGB(52, 199, 89);
+            _createVaultCenteredButton.BackgroundColor = UIColor.SystemGreen;
             _createVaultCenteredButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
             _createVaultCenteredButton.Layer.CornerRadius = 13f;
             _createVaultCenteredButton.TouchUpInside += (_, _) => PromptCreateVaultSettingsMenu();
@@ -325,7 +325,7 @@ namespace vault.iOS
             _extraButton = new UIButton(UIButtonType.System);
             _extraButton.SetTitle("ANALISI FOLLOWERS", UIControlState.Normal);
             _extraButton.SetTitleColor(UIColor.White, UIControlState.Normal);
-            _extraButton.BackgroundColor = UIColor.FromRGB(255, 159, 10);
+            _extraButton.BackgroundColor = UIColor.SystemOrange;
             _extraButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
             _extraButton.Layer.CornerRadius = 13f;
             _extraButton.TouchUpInside += (_, _) => ShowExtraMenu();
@@ -517,8 +517,8 @@ namespace vault.iOS
             _bottomTabBar = new UITabBar
             {
                 Translucent = false,
-                BarTintColor = UIColor.FromRGB(249, 249, 252),
-                TintColor = UIColor.FromRGB(10, 132, 255),
+                BarTintColor = UIColor.SystemBackground,
+                TintColor = UIColor.SystemBlue,
                 Items = new[]
                 {
                     _vaultTabItem,
@@ -617,19 +617,19 @@ namespace vault.iOS
             _busyOverlay = new UIView(view.Bounds)
             {
                 AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight,
-                BackgroundColor = UIColor.Black.ColorWithAlpha(0.35f),
+                BackgroundColor = UIColor.SystemBackground.ColorWithAlpha(0.35f),
                 Hidden = true
             };
 
             _busyIndicator = new UIActivityIndicatorView(UIActivityIndicatorViewStyle.Large)
             {
-                Color = UIColor.White
+                Color = UIColor.Label
             };
 
             _busyLabel = new UILabel
             {
                 Font = UIFont.SystemFontOfSize(15, UIFontWeight.Medium),
-                TextColor = UIColor.White,
+                TextColor = UIColor.Label,
                 TextAlignment = UITextAlignment.Center,
                 Lines = 2,
                 Text = "Operazione in corso..."
@@ -639,14 +639,14 @@ namespace vault.iOS
             {
                 Progress = 0f,
                 Hidden = true,
-                TrackTintColor = UIColor.White.ColorWithAlpha(0.24f),
-                ProgressTintColor = UIColor.FromRGB(90, 200, 255)
+                TrackTintColor = UIColor.Label.ColorWithAlpha(0.24f),
+                ProgressTintColor = UIColor.SystemBlue
             };
 
             _busyProgressPercentLabel = new UILabel
             {
                 Font = UIFont.SystemFontOfSize(12, UIFontWeight.Semibold),
-                TextColor = UIColor.White,
+                TextColor = UIColor.Label,
                 TextAlignment = UITextAlignment.Center,
                 Hidden = true,
                 Text = "0%"
@@ -665,7 +665,7 @@ namespace vault.iOS
 
             _pathNavigateUpButton = new UIButton(UIButtonType.System);
             _pathNavigateUpButton.SetImage(UIImage.GetSystemImage("chevron.up"), UIControlState.Normal);
-            _pathNavigateUpButton.TintColor = UIColor.FromRGB(10, 132, 255);
+            _pathNavigateUpButton.TintColor = UIColor.SystemBlue;
             _pathNavigateUpButton.TouchUpInside += (_, _) => NavigateUp();
 
             _pathTitleButton = new UIButton(UIButtonType.System);
@@ -682,7 +682,7 @@ namespace vault.iOS
 
             _settingsGearButton = UIButton.FromType(UIButtonType.System);
             _settingsGearButton.SetImage(UIImage.GetSystemImage("gearshape.fill"), UIControlState.Normal);
-            _settingsGearButton.TintColor = UIColor.FromRGB(10, 132, 255);
+            _settingsGearButton.TintColor = UIColor.SystemBlue;
             _settingsGearButton.TouchUpInside += (_, _) => OpenManageRecentVaultsMenu();
             _settingsGearButton.Hidden = false;
 
@@ -6283,28 +6283,28 @@ namespace vault.iOS
                 BackgroundColor = UIColor.Clear;
                 ContentView.BackgroundColor = UIColor.Clear;
 
-                _card.BackgroundColor = UIColor.FromRGB(245, 245, 247);
+                _card.BackgroundColor = UIColor.SystemGroupedBackground;
                 _card.Layer.CornerRadius = 12f;
                 _card.Layer.BorderWidth = 1f;
-                _card.Layer.BorderColor = UIColor.FromRGB(220, 220, 225).CGColor;
+                _card.Layer.BorderColor = UIColor.Separator.CGColor;
                 _card.ClipsToBounds = true;
 
                 _iconView.ContentMode = UIViewContentMode.ScaleAspectFit;
-                _iconView.TintColor = UIColor.FromRGB(10, 132, 255);
+                _iconView.TintColor = UIColor.SystemBlue;
 
                 _titleLabel.Font = UIFont.SystemFontOfSize(14, UIFontWeight.Semibold);
-                _titleLabel.TextColor = UIColor.Black;
+                _titleLabel.TextColor = UIColor.Label;
                 _titleLabel.Lines = 2;
 
                 _subtitleLabel.Font = UIFont.SystemFontOfSize(12);
-                _subtitleLabel.TextColor = UIColor.DarkGray;
+                _subtitleLabel.TextColor = UIColor.SecondaryLabel;
                 _subtitleLabel.Lines = 2;
 
                 _selectionBadge.Hidden = true;
                 _selectionBadge.Font = UIFont.SystemFontOfSize(13, UIFontWeight.Bold);
                 _selectionBadge.TextAlignment = UITextAlignment.Center;
                 _selectionBadge.TextColor = UIColor.White;
-                _selectionBadge.BackgroundColor = UIColor.FromRGB(10, 132, 255);
+                _selectionBadge.BackgroundColor = UIColor.SystemBlue;
                 _selectionBadge.Layer.CornerRadius = 10f;
                 _selectionBadge.ClipsToBounds = true;
 
@@ -6349,7 +6349,7 @@ namespace vault.iOS
                     _iconView.Image = UIImage.GetSystemImage(GetSymbolName(item));
                     _iconView.ContentMode = UIViewContentMode.ScaleAspectFit;
                     _iconView.ClipsToBounds = false;
-                    _iconView.TintColor = item.IsFolder ? UIColor.FromRGB(10, 132, 255) : UIColor.Gray;
+                    _iconView.TintColor = item.IsFolder ? UIColor.SystemBlue : UIColor.Gray;
                 }
 
                 _titleLabel.Text = item.FileName;
@@ -6359,10 +6359,10 @@ namespace vault.iOS
 
                 _selectionBadge.Hidden = !isSelectionMode;
                 _selectionBadge.Text = isSelected ? "OK" : string.Empty;
-                _selectionBadge.BackgroundColor = isSelected ? UIColor.FromRGB(10, 132, 255) : UIColor.Gray;
+                _selectionBadge.BackgroundColor = isSelected ? UIColor.SystemBlue : UIColor.Gray;
                 _card.Layer.BorderColor = isSelected
-                    ? UIColor.FromRGB(10, 132, 255).CGColor
-                    : UIColor.FromRGB(220, 220, 225).CGColor;
+                    ? UIColor.SystemBlue.CGColor
+                    : UIColor.Separator.CGColor;
                 _card.Layer.BorderWidth = isSelected ? 2f : 1f;
             }
 
@@ -7194,7 +7194,7 @@ namespace vault.iOS
             {
                 base.ViewDidLoad();
 
-                View!.BackgroundColor = UIColor.Black;
+                View!.BackgroundColor = UIColor.SystemBackground;
                 NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
                 NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
                     "Chiudi",
@@ -7204,7 +7204,7 @@ namespace vault.iOS
 
                 _scrollView = new UIScrollView
                 {
-                    BackgroundColor = UIColor.Black,
+                    BackgroundColor = UIColor.SystemBackground,
                     BouncesZoom = true,
                     MinimumZoomScale = 1f,
                     MaximumZoomScale = 4f,
@@ -7217,7 +7217,7 @@ namespace vault.iOS
                 _imageView = new UIImageView
                 {
                     ContentMode = UIViewContentMode.ScaleToFill,
-                    BackgroundColor = UIColor.Black,
+                    BackgroundColor = UIColor.SystemBackground,
                     UserInteractionEnabled = true
                 };
                 _scrollView.AddSubview(_imageView);
@@ -7230,14 +7230,14 @@ namespace vault.iOS
 
                 _counterLabel = new UILabel
                 {
-                    TextColor = UIColor.White,
+                    TextColor = UIColor.Label,
                     Font = UIFont.SystemFontOfSize(13, UIFontWeight.Semibold),
                     TextAlignment = UITextAlignment.Center
                 };
 
                 _hintLabel = new UILabel
                 {
-                    TextColor = UIColor.FromWhiteAlpha(1f, 0.72f),
+                    TextColor = UIColor.Label.ColorWithAlpha(0.72f),
                     Font = UIFont.SystemFontOfSize(12f),
                     TextAlignment = UITextAlignment.Center,
                     Text = "Scorri o usa pinch / doppio tocco"
@@ -7245,7 +7245,7 @@ namespace vault.iOS
 
                 _errorLabel = new UILabel
                 {
-                    TextColor = UIColor.FromRGB(255, 105, 97),
+                    TextColor = UIColor.SystemRed,
                     Font = UIFont.SystemFontOfSize(14, UIFontWeight.Medium),
                     TextAlignment = UITextAlignment.Center,
                     Lines = 2,
@@ -7711,7 +7711,7 @@ namespace vault.iOS
             {
                 base.ViewDidLoad();
 
-                View!.BackgroundColor = UIColor.Black;
+                View!.BackgroundColor = UIColor.SystemBackground;
                 Title = "Modifica";
                 NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
                 NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
@@ -7726,7 +7726,7 @@ namespace vault.iOS
                 _imageView = new UIImageView
                 {
                     ContentMode = UIViewContentMode.ScaleAspectFit,
-                    BackgroundColor = UIColor.Black,
+                    BackgroundColor = UIColor.SystemBackground,
                     Image = null
                 };
 
@@ -7751,7 +7751,7 @@ namespace vault.iOS
 
                 _busyOverlay = new UIView
                 {
-                    BackgroundColor = UIColor.FromWhiteAlpha(0f, 0.45f),
+                    BackgroundColor = UIColor.SystemBackground.ColorWithAlpha(0.45f),
                     Hidden = true
                 };
 
@@ -7763,7 +7763,7 @@ namespace vault.iOS
 
                 _busyLabel = new UILabel
                 {
-                    TextColor = UIColor.White,
+                    TextColor = UIColor.Label,
                     Font = UIFont.SystemFontOfSize(15f, UIFontWeight.Semibold),
                     TextAlignment = UITextAlignment.Center,
                     Lines = 2
@@ -7771,13 +7771,13 @@ namespace vault.iOS
 
                 _busyProgressView = new UIProgressView(UIProgressViewStyle.Default)
                 {
-                    TrackTintColor = UIColor.FromWhiteAlpha(1f, 0.18f),
+                    TrackTintColor = UIColor.Label.ColorWithAlpha(0.18f),
                     ProgressTintColor = UIColor.White
                 };
 
                 _busyPercentLabel = new UILabel
                 {
-                    TextColor = UIColor.FromWhiteAlpha(1f, 0.86f),
+                    TextColor = UIColor.Label.ColorWithAlpha(0.86f),
                     Font = UIFont.MonospacedDigitSystemFontOfSize(13f, UIFontWeight.Medium),
                     TextAlignment = UITextAlignment.Center
                 };
@@ -8183,7 +8183,7 @@ namespace vault.iOS
             {
                 base.ViewDidLoad();
 
-                View!.BackgroundColor = UIColor.Black;
+                View!.BackgroundColor = UIColor.SystemBackground;
                 Title = "Ritaglia";
                 NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
                 NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
@@ -8197,20 +8197,20 @@ namespace vault.iOS
 
                 _previewContainer = new UIView
                 {
-                    BackgroundColor = UIColor.Black,
+                    BackgroundColor = UIColor.SystemBackground,
                     ClipsToBounds = true
                 };
 
                 _imageView = new UIImageView(_image)
                 {
                     ContentMode = UIViewContentMode.ScaleAspectFit,
-                    BackgroundColor = UIColor.Black
+                    BackgroundColor = UIColor.SystemBackground
                 };
 
                 _hintLabel = new UILabel
                 {
                     Text = "Trascina l'area per ritagliare",
-                    TextColor = UIColor.FromWhiteAlpha(1f, 0.78f),
+                    TextColor = UIColor.Label.ColorWithAlpha(0.78f),
                     Font = UIFont.SystemFontOfSize(13f, UIFontWeight.Medium),
                     TextAlignment = UITextAlignment.Center
                 };
@@ -8225,7 +8225,7 @@ namespace vault.iOS
                     BackgroundColor = UIColor.Clear,
                     UserInteractionEnabled = true
                 };
-                _cropBorder.Layer.BorderColor = UIColor.White.CGColor;
+                _cropBorder.Layer.BorderColor = UIColor.Separator.CGColor;
                 _cropBorder.Layer.BorderWidth = 2f;
                 _cropBorder.AddGestureRecognizer(new UIPanGestureRecognizer(HandleMoveCropRect));
 
@@ -8289,7 +8289,7 @@ namespace vault.iOS
             {
                 return new UIView
                 {
-                    BackgroundColor = UIColor.FromWhiteAlpha(0f, 0.55f),
+                    BackgroundColor = UIColor.SystemBackground.ColorWithAlpha(0.55f),
                     UserInteractionEnabled = false
                 };
             }
@@ -8298,11 +8298,11 @@ namespace vault.iOS
             {
                 var handle = new UIView
                 {
-                    BackgroundColor = UIColor.White,
+                    BackgroundColor = UIColor.SystemBackground,
                     Tag = tag
                 };
                 handle.Layer.CornerRadius = HandleSize / 2f;
-                handle.Layer.BorderColor = UIColor.Black.CGColor;
+                handle.Layer.BorderColor = UIColor.Separator.CGColor;
                 handle.Layer.BorderWidth = 1.2f;
                 handle.AddGestureRecognizer(new UIPanGestureRecognizer(HandleResizeCropRect));
                 return handle;
@@ -8489,7 +8489,7 @@ namespace vault.iOS
             {
                 base.ViewDidLoad();
 
-                View!.BackgroundColor = UIColor.Black;
+                View!.BackgroundColor = UIColor.SystemBackground;
                 Title = _displayName;
                 NavigationItem.LargeTitleDisplayMode = UINavigationItemLargeTitleDisplayMode.Never;
                 NavigationItem.LeftBarButtonItem = new UIBarButtonItem(
