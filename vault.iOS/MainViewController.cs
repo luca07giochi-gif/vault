@@ -323,7 +323,7 @@ namespace vault.iOS
             View.AddSubview(_createVaultCenteredButton);
 
             _extraButton = new UIButton(UIButtonType.System);
-            _extraButton.SetTitle("ANALISI FOLLOWERS", UIControlState.Normal);
+            _extraButton.SetTitle("Analisi Instagram", UIControlState.Normal);
             _extraButton.SetTitleColor(UIColor.White, UIControlState.Normal);
             _extraButton.BackgroundColor = UIColor.SystemOrange;
             _extraButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
@@ -8509,6 +8509,10 @@ namespace vault.iOS
                 UIView? playerView = playerController.View;
                 if (playerView == null)
                     throw new InvalidOperationException("Player video non disponibile.");
+
+                playerView.Frame = View.Bounds;
+                playerView.AutoresizingMask = UIViewAutoresizing.FlexibleWidth | UIViewAutoresizing.FlexibleHeight;
+                playerView.BackgroundColor = UIColor.Black;
 
                 AddChildViewController(playerController);
                 View.AddSubview(playerView);
