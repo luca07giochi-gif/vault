@@ -323,7 +323,7 @@ namespace vault.iOS
             View.AddSubview(_createVaultCenteredButton);
 
             _extraButton = new UIButton(UIButtonType.System);
-            _extraButton.SetTitle("Extra", UIControlState.Normal);
+            _extraButton.SetTitle("ANALISI FOLLOWERS", UIControlState.Normal);
             _extraButton.SetTitleColor(UIColor.White, UIControlState.Normal);
             _extraButton.BackgroundColor = UIColor.FromRGB(255, 159, 10);
             _extraButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18, UIFontWeight.Semibold);
@@ -336,7 +336,7 @@ namespace vault.iOS
                 TextAlignment = UITextAlignment.Center,
                 Lines = 1,
                 Font = UIFont.SystemFontOfSize(12f),
-                TextColor = UIColor.FromRGB(120, 120, 120),
+                TextColor = UIColor.SecondaryLabel,
                 Text = GetHomeVersionText(),
                 Hidden = false
             };
@@ -780,6 +780,12 @@ namespace vault.iOS
                     _collectionView.Hidden = true;
                 if (_emptyLabel != null)
                     _emptyLabel.Hidden = true;
+
+                // Hide the custom title view on the home screen so the old "Cassaforte iOS" label
+                // is not shown anymore (project has grown beyond that name).
+                NavigationItem.TitleView = null;
+                Title = string.Empty;
+
                 RefreshNavigationItems();
                 View?.SetNeedsLayout();
                 return;

@@ -33,7 +33,7 @@ namespace vault.iOS
             base.ViewDidLoad();
 
             Title = "Analisi Instagram";
-            View!.BackgroundColor = UIColor.White;
+            View!.BackgroundColor = UIColor.SystemBackground;
             EdgesForExtendedLayout = UIRectEdge.None;
             if (NavigationController != null)
             {
@@ -51,7 +51,8 @@ namespace vault.iOS
                 RowHeight = 56,
                 SeparatorStyle = UITableViewCellSeparatorStyle.SingleLine,
                 SeparatorInset = UIEdgeInsets.Zero,
-                BackgroundColor = UIColor.White
+                SeparatorColor = UIColor.Separator,
+                BackgroundColor = UIColor.SystemBackground
             };
 
             _tableSource = new InstagramListDataSource(_currentList);
@@ -71,7 +72,7 @@ namespace vault.iOS
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
                 TextAlignment = UITextAlignment.Center,
-                TextColor = UIColor.DarkGray,
+                TextColor = UIColor.SecondaryLabel,
                 Text = "Importa i dati di Instagram per iniziare l'analisi",
                 Lines = 2,
                 Font = UIFont.SystemFontOfSize(16)
@@ -127,8 +128,8 @@ namespace vault.iOS
             _bottomTabBar = new UITabBar
             {
                 Translucent = false,
-                BarTintColor = UIColor.FromRGB(249, 249, 252),
-                TintColor = UIColor.FromRGB(10, 132, 255),
+                BarTintColor = UIColor.SystemBackground,
+                TintColor = UIColor.SystemBlue,
                 Items = new[]
                 {
                     _homeTabItem,
@@ -357,15 +358,16 @@ namespace vault.iOS
             string username = indexPath.Row < _users.Count ? _users[indexPath.Row].Username : string.Empty;
             cell.TextLabel!.Text = username;
             cell.TextLabel.Font = UIFont.SystemFontOfSize(16, UIFontWeight.Medium);
+            cell.TextLabel.TextColor = UIColor.Label;
             cell.SelectionStyle = UITableViewCellSelectionStyle.Default;
-            cell.BackgroundColor = UIColor.White;
+            cell.BackgroundColor = UIColor.SystemBackground;
 
             var linkButton = new UIButton(UIButtonType.System)
             {
                 Frame = new CGRect(0, 0, 32, 32)
             };
             linkButton.SetImage(UIImage.GetSystemImage("link"), UIControlState.Normal);
-            linkButton.TintColor = UIColor.FromRGB(10, 132, 255);
+            linkButton.TintColor = UIColor.SystemBlue;
             linkButton.TouchUpInside += (_, _) =>
             {
                 if (!string.IsNullOrWhiteSpace(username))
