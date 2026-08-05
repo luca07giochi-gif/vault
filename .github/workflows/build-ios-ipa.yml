@@ -243,9 +243,12 @@ jobs:
 
       - name: Invia IPA su Telegram
         if: success()
-        uses: appleboy/telegram-action@master
-        with:
-          to: ${{ secrets.TELEGRAM_TO }}
-          token: ${{ secrets.TELEGRAM_TOKEN }}
-          message: "🚀 Nuova build IPA completata con successo!"
-          document: ${{ steps.locate.outputs.ipa_path }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_TO: ${{ secrets.TELEGRAM_TO }}
+          IPA_PATH: ${{ steps.locate.outputs.ipa_path }}
+        run: |
+          curl -v -F chat_id="$TELEGRAM_TO" \
+               -F document=@"$IPA_PATH" \
+               -F caption="📱 Nuovo file .ipa generato!" \
+               "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument"
