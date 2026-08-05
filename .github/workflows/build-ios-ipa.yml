@@ -240,3 +240,12 @@ jobs:
           name: vault-ios-ipa
           path: ${{ steps.locate.outputs.ipa_path }}
           if-no-files-found: error
+
+      - name: Invia IPA su Telegram
+        if: success()
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          message: "🚀 Nuova build IPA completata con successo!"
+          document: ${{ steps.locate.outputs.ipa_path }}
