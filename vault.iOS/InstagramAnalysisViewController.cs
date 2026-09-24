@@ -353,25 +353,15 @@ namespace vault.iOS
 
         {
 
-            BeginInvokeOnMainThread(() =>
-
-            {
-
-                _loadingIndicator?.StartAnimating();
-
-                _loadingIndicator!.Hidden = false;
-
-            });
-
-
-
             try
-
             {
+                BeginInvokeOnMainThread(() =>
+                {
+                    _loadingIndicator?.StartAnimating();
+                    _loadingIndicator!.Hidden = false;
+                });
 
                 var result = await _analysisService.AnalyzeFromZipAsync(fileUrl);
-
-
 
                 BeginInvokeOnMainThread(() =>
 
