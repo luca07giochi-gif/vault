@@ -683,39 +683,28 @@ namespace vault.iOS
 
         {
 
-            try
+            var cell = tableView.DequeueReusableCell(InstagramUserCell.CellId, indexPath) as InstagramUserCell
+
+                ?? new InstagramUserCell(IntPtr.Zero);
+
+
+
+            if (indexPath.Row >= 0 && indexPath.Row < _users.Count)
+
             {
-                var cell = tableView.DequeueReusableCell(InstagramUserCell.CellId, indexPath) as InstagramUserCell
 
-                    ?? new InstagramUserCell(IntPtr.Zero);
+                cell.Configure(_users[indexPath.Row]);
 
-
-
-                if (indexPath.Row >= 0 && indexPath.Row < _users.Count)
-
-                {
-
-                    cell.Configure(_users[indexPath.Row]);
-
-                }
-                else
-                {
-                    // Return empty cell for invalid indices to prevent crashes
-                    cell.Configure(new InstagramAnalysisService.InstagramUser { Username = "" });
-                }
-
-
-
-                return cell;
             }
-            catch (Exception ex)
+            else
             {
-                System.Diagnostics.Debug.WriteLine($"Error in GetCell: {ex.Message}");
-                // Return a basic cell to prevent crashes
-                var fallbackCell = new UITableViewCell(UITableViewCellStyle.Default, "fallback");
-                fallbackCell.TextLabel.Text = "Error";
-                return fallbackCell;
+                // Return empty cell for invalid indices to prevent crashes
+                cell.Configure(new InstagramAnalysisService.InstagramUser { Username = "" });
             }
+
+
+
+            return cell;
 
         }
 
