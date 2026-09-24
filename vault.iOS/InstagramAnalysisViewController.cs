@@ -167,7 +167,7 @@ namespace vault.iOS
 
 
             // Setup table view with optimizations for large datasets
-            _tableSource = new InstagramTableSource(_followers);
+            _tableSource = new InstagramTableSource(new List<InstagramAnalysisService.InstagramUser>());
 
             _tableView = new UITableView(CGRect.Empty, UITableViewStyle.Plain)
 
@@ -383,11 +383,10 @@ namespace vault.iOS
 
 
 
-                    _followers = result.Followers;
-
-                    _following = result.Following;
-
-                    _notFollowingBack = result.NotFollowingBack;
+                    // Update the data on the main thread to ensure thread safety
+                    _followers = new List<InstagramAnalysisService.InstagramUser>(result.Followers);
+                    _following = new List<InstagramAnalysisService.InstagramUser>(result.Following);
+                    _notFollowingBack = new List<InstagramAnalysisService.InstagramUser>(result.NotFollowingBack);
 
 
 
@@ -483,10 +482,12 @@ namespace vault.iOS
 
 
 
-            // Update the data source with the new list
-            _tableSource.UpdateUsers(newList);
-
-            _tableView.ReloadData();
+            // Update the data source and reload data on main thread to ensure thread safety
+            BeginInvokeOnMainThread(() =>
+            {
+                _tableSource.UpdateUsers(newList);
+                _tableView.ReloadData();
+            });
 
         }
 
@@ -579,18 +580,21 @@ namespace vault.iOS
             // Remove all existing targets to prevent memory leaks
             _linkButton?.RemoveTarget(null, UIControlEvent.AllTouchEvents);
 
+            // Store the URL to avoid lambda capture issues
+            var urlToOpen = user.InstagramUrl;
+
             // Add new target with proper memory management
             _linkButton?.AddTarget((sender, e) =>
 
             {
 
-                if (!string.IsNullOrWhiteSpace(user.InstagramUrl))
+                if (!string.IsNullOrWhiteSpace(urlToOpen))
 
                 {
 
 #pragma warning disable CA1422
 
-                    UIApplication.SharedApplication.OpenUrl(new NSUrl(user.InstagramUrl), new UIApplicationOpenUrlOptions(), null);
+                    UIApplication.SharedApplication.OpenUrl(new NSUrl(urlToOpen), new UIApplicationOpenUrlOptions(), null);
 
 #pragma warning restore CA1422
 
@@ -668,7 +672,8 @@ namespace vault.iOS
 
         {
 
-            _users = users;
+            // Create a copy to avoid reference issues
+            _users = new List<InstagramAnalysisService.InstagramUser>(users);
 
         }
 
@@ -678,28 +683,39 @@ namespace vault.iOS
 
         {
 
-            var cell = tableView.DequeueReusableCell(InstagramUserCell.CellId, indexPath) as InstagramUserCell
-
-                ?? new InstagramUserCell(IntPtr.Zero);
-
-
-
-            if (indexPath.Row >= 0 && indexPath.Row < _users.Count)
-
+            try
             {
+                var cell = tableView.DequeueReusableCell(InstagramUserCell.CellId, indexPath) as InstagramUserCell
 
-                cell.Configure(_users[indexPath.Row]);
+                    ?? new InstagramUserCell(IntPtr.Zero);
 
+
+
+                if (indexPath.Row >= 0 && indexPath.Row < _users.Count)
+
+                {
+
+                    cell.Configure(_users[indexPath.Row]);
+
+                }
+                else
+                {
+                    // Return empty cell for invalid indices to prevent crashes
+                    cell.Configure(new InstagramAnalysisService.InstagramUser { Username = "" });
+                }
+
+
+
+                return cell;
             }
-            else
+            catch (Exception ex)
             {
-                // Return empty cell for invalid indices to prevent crashes
-                cell.Configure(new InstagramAnalysisService.InstagramUser { Username = "" });
+                System.Diagnostics.Debug.WriteLine($"Error in GetCell: {ex.Message}");
+                // Return a basic cell to prevent crashes
+                var fallbackCell = new UITableViewCell(UITableViewCellStyle.Default, "fallback");
+                fallbackCell.TextLabel.Text = "Error";
+                return fallbackCell;
             }
-
-
-
-            return cell;
 
         }
 
