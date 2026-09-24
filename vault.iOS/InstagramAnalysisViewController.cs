@@ -167,7 +167,7 @@ namespace vault.iOS
 
 
             // Setup table view with optimizations for large datasets
-            _tableSource = new InstagramTableSource(new List<InstagramAnalysisService.InstagramUser>());
+            _tableSource = new InstagramTableSource(_followers);
 
             _tableView = new UITableView(CGRect.Empty, UITableViewStyle.Plain)
 
@@ -383,10 +383,10 @@ namespace vault.iOS
 
 
 
-                    // Update the data on the main thread to ensure thread safety
-                    _followers = new List<InstagramAnalysisService.InstagramUser>(result.Followers);
-                    _following = new List<InstagramAnalysisService.InstagramUser>(result.Following);
-                    _notFollowingBack = new List<InstagramAnalysisService.InstagramUser>(result.NotFollowingBack);
+                    // Direct assignment for now to isolate crash
+                    _followers = result.Followers;
+                    _following = result.Following;
+                    _notFollowingBack = result.NotFollowingBack;
 
 
 
@@ -482,12 +482,9 @@ namespace vault.iOS
 
 
 
-            // Update the data source and reload data on main thread to ensure thread safety
-            BeginInvokeOnMainThread(() =>
-            {
-                _tableSource.UpdateUsers(newList);
-                _tableView.ReloadData();
-            });
+            // Direct update for now to isolate crash
+            _tableSource.UpdateUsers(newList);
+            _tableView.ReloadData();
 
         }
 
@@ -557,15 +554,13 @@ namespace vault.iOS
 
             ContentView.AddSubview(_usernameLabel);
 
-
-
+            // Temporarily disable link button to isolate crash
+            /*
             _linkButton = UIButton.FromType(UIButtonType.System);
-
             _linkButton.SetTitle("🔗", UIControlState.Normal);
-
             _linkButton.TitleLabel!.Font = UIFont.SystemFontOfSize(18);
-
             ContentView.AddSubview(_linkButton);
+            */
 
         }
 
@@ -584,26 +579,8 @@ namespace vault.iOS
             // Store the URL in the cell instance
             _currentUrl = user.InstagramUrl;
 
-
-
-            // Remove all existing targets to prevent memory leaks
-            if (_linkButton != null)
-            {
-                _linkButton.RemoveTarget(null, UIControlEvent.AllTouchEvents);
-
-                // Use the stored URL from the cell instance
-
-                // Add new target that uses the stored URL
-                _linkButton.AddTarget((sender, e) =>
-                {
-                    if (!string.IsNullOrWhiteSpace(_currentUrl))
-                    {
-#pragma warning disable CA1422
-                        UIApplication.SharedApplication.OpenUrl(new NSUrl(_currentUrl), new UIApplicationOpenUrlOptions(), null);
-#pragma warning restore CA1422
-                    }
-                }, UIControlEvent.TouchUpInside);
-            }
+            // Temporarily disable link button to isolate crash
+            // Link button functionality disabled for debugging
 
         }
 
@@ -675,8 +652,8 @@ namespace vault.iOS
 
         {
 
-            // Create a copy to avoid reference issues
-            _users = new List<InstagramAnalysisService.InstagramUser>(users);
+            // Direct assignment for now to isolate crash
+            _users = users;
 
         }
 
