@@ -521,6 +521,8 @@ namespace vault.iOS
 
         private UIButton? _linkButton;
 
+        private string? _currentUrl;
+
 
 
         public InstagramUserCell(IntPtr handle) : base(handle)
@@ -573,34 +575,35 @@ namespace vault.iOS
 
         {
 
-            _usernameLabel!.Text = user.Username;
+            // Safely update the username label
+            if (_usernameLabel != null)
+            {
+                _usernameLabel.Text = user.Username;
+            }
+
+            // Store the URL in the cell instance
+            _currentUrl = user.InstagramUrl;
 
 
 
             // Remove all existing targets to prevent memory leaks
-            _linkButton?.RemoveTarget(null, UIControlEvent.AllTouchEvents);
-
-            // Store the URL to avoid lambda capture issues
-            var urlToOpen = user.InstagramUrl;
-
-            // Add new target with proper memory management
-            _linkButton?.AddTarget((sender, e) =>
-
+            if (_linkButton != null)
             {
+                _linkButton.RemoveTarget(null, UIControlEvent.AllTouchEvents);
 
-                if (!string.IsNullOrWhiteSpace(urlToOpen))
+                // Use the stored URL from the cell instance
 
+                // Add new target that uses the stored URL
+                _linkButton.AddTarget((sender, e) =>
                 {
-
+                    if (!string.IsNullOrWhiteSpace(_currentUrl))
+                    {
 #pragma warning disable CA1422
-
-                    UIApplication.SharedApplication.OpenUrl(new NSUrl(urlToOpen), new UIApplicationOpenUrlOptions(), null);
-
+                        UIApplication.SharedApplication.OpenUrl(new NSUrl(_currentUrl), new UIApplicationOpenUrlOptions(), null);
 #pragma warning restore CA1422
-
-                }
-
-            }, UIControlEvent.TouchUpInside);
+                    }
+                }, UIControlEvent.TouchUpInside);
+            }
 
         }
 
