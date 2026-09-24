@@ -28,7 +28,7 @@ namespace vault.iOS
 
         private UIButton? _importButton;
 
-
+        private InstagramTableSource? _tableSource;
 
         private List<InstagramAnalysisService.InstagramUser> _followers = new();
 
@@ -167,6 +167,7 @@ namespace vault.iOS
 
 
             // Setup table view with optimizations for large datasets
+            _tableSource = new InstagramTableSource(_followers);
 
             _tableView = new UITableView(CGRect.Empty, UITableViewStyle.Plain)
 
@@ -176,7 +177,7 @@ namespace vault.iOS
 
                 Delegate = new InstagramTableDelegate(),
 
-                DataSource = new InstagramTableSource(_followers),
+                DataSource = _tableSource,
 
                 Hidden = true,
 
@@ -442,7 +443,7 @@ namespace vault.iOS
 
         {
 
-            if (_segmentControl == null || _tableView == null)
+            if (_segmentControl == null || _tableView == null || _tableSource == null)
 
                 return;
 
@@ -483,16 +484,7 @@ namespace vault.iOS
 
 
             // Update the data source with the new list
-
-            if (_tableView.DataSource is InstagramTableSource dataSource)
-
-            {
-
-                dataSource.UpdateUsers(newList);
-
-            }
-
-
+            _tableSource.UpdateUsers(newList);
 
             _tableView.ReloadData();
 
@@ -584,9 +576,11 @@ namespace vault.iOS
 
 
 
-            _linkButton?.RemoveTarget(null, UIControlEvent.AllEvents);
+            // Remove all existing targets to prevent memory leaks
+            _linkButton?.RemoveTarget(null, UIControlEvent.AllTouchEvents);
 
-            _linkButton?.AddTarget((_, _) =>
+            // Add new target with proper memory management
+            _linkButton?.AddTarget((sender, e) =>
 
             {
 
@@ -690,12 +684,17 @@ namespace vault.iOS
 
 
 
-            if (indexPath.Row < _users.Count)
+            if (indexPath.Row >= 0 && indexPath.Row < _users.Count)
 
             {
 
                 cell.Configure(_users[indexPath.Row]);
 
+            }
+            else
+            {
+                // Return empty cell for invalid indices to prevent crashes
+                cell.Configure(new InstagramAnalysisService.InstagramUser { Username = "" });
             }
 
 
