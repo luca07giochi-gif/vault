@@ -32,9 +32,29 @@ namespace vault.iOS
 
                 try
                 {
-                    string? zipPath = zipUrl.Path;
-                    if (string.IsNullOrEmpty(zipPath) || !File.Exists(zipPath))
+                    // Try to get the file path with better error handling
+                    string? zipPath = null;
+                    try
+                    {
+                        zipPath = zipUrl.Path;
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Error getting file path: {ex.Message}");
                         return result;
+                    }
+
+                    if (string.IsNullOrEmpty(zipPath))
+                    {
+                        System.Diagnostics.Debug.WriteLine("File path is null or empty");
+                        return result;
+                    }
+
+                    if (!File.Exists(zipPath))
+                    {
+                        System.Diagnostics.Debug.WriteLine($"File does not exist: {zipPath}");
+                        return result;
+                    }
 
                     using (var archive = ZipFile.OpenRead(zipPath))
                     {
@@ -58,6 +78,7 @@ namespace vault.iOS
                 catch (Exception ex)
                 {
                     System.Diagnostics.Debug.WriteLine($"Error analyzing Instagram data: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
                 }
 
                 return result;
@@ -66,13 +87,21 @@ namespace vault.iOS
 
         private string ExtractHtmlFromZip(ZipArchive archive, string entryPath)
         {
-            var entry = archive.GetEntry(entryPath);
-            if (entry == null)
-                return string.Empty;
-
-            using (var reader = new StreamReader(entry.Open()))
+            try
             {
-                return reader.ReadToEnd();
+                var entry = archive.GetEntry(entryPath);
+                if (entry == null)
+                    return string.Empty;
+
+                using (var reader = new StreamReader(entry.Open()))
+                {
+                    return reader.ReadToEnd();
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error extracting {entryPath}: {ex.Message}");
+                return string.Empty;
             }
         }
 
@@ -87,22 +116,24 @@ namespace vault.iOS
             {
                 var usernameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                foreach (var username in ExtractUsernamesFromAnchors(htmlContent))
+                // Simple text extraction instead of complex regex
+                var lines = htmlContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var line in lines)
                 {
-                    if (IsValidInstagramUsername(username))
-                    {
-                        usernameSet.Add(username);
-                    }
-                }
+                    var cleanedLine = line.Trim();
+                    if (string.IsNullOrWhiteSpace(cleanedLine))
+                        continue;
 
-                if (usernameSet.Count == 0)
-                {
-                    foreach (var username in ExtractUsernamesFromText(htmlContent))
+                    // Skip common non-username lines
+                    if (cleanedLine.Length < 3 || cleanedLine.Length > 30)
+                        continue;
+
+                    if (cleanedLine.Contains("http") || cleanedLine.Contains("www"))
+                        continue;
+
+                    if (IsValidInstagramUsername(cleanedLine))
                     {
-                        if (IsValidInstagramUsername(username))
-                        {
-                            usernameSet.Add(username);
-                        }
+                        usernameSet.Add(cleanedLine);
                     }
                 }
 
