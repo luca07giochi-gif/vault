@@ -116,24 +116,16 @@ namespace vault.iOS
             {
                 var usernameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                // Simple text extraction instead of complex regex
-                var lines = htmlContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var line in lines)
+                // Use regex to extract usernames from anchor tags
+                var anchorRegex = new Regex(@"<a[^>]+href=""https://www\.instagram\.com/([^""]+)""[^>]*>([^<]+)</a>", RegexOptions.IgnoreCase | RegexOptions.Multiline);
+                var matches = anchorRegex.Matches(htmlContent);
+
+                foreach (Match match in matches)
                 {
-                    var cleanedLine = line.Trim();
-                    if (string.IsNullOrWhiteSpace(cleanedLine))
-                        continue;
-
-                    // Skip common non-username lines
-                    if (cleanedLine.Length < 3 || cleanedLine.Length > 30)
-                        continue;
-
-                    if (cleanedLine.Contains("http") || cleanedLine.Contains("www"))
-                        continue;
-
-                    if (IsValidInstagramUsername(cleanedLine))
+                    var username = match.Groups[1].Value?.Trim();
+                    if (!string.IsNullOrWhiteSpace(username) && IsValidInstagramUsername(username))
                     {
-                        usernameSet.Add(cleanedLine);
+                        usernameSet.Add(username);
                     }
                 }
 
