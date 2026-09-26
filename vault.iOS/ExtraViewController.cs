@@ -11,6 +11,13 @@ namespace vault.iOS
             Title = "Extra";
             View!.BackgroundColor = UIColor.White;
 
+            UIButton settingsButton = UIButton.FromType(UIButtonType.System);
+            settingsButton.SetImage(UIImage.GetSystemImage("gearshape.fill"), UIControlState.Normal);
+            settingsButton.TintColor = UIColor.FromRGB(10, 132, 255);
+            settingsButton.AccessibilityLabel = "Impostazioni analisi Instagram";
+            settingsButton.TouchUpInside += (_, _) => OpenInstagramAnalysisSettings();
+            NavigationItem.RightBarButtonItem = new UIBarButtonItem(settingsButton);
+
             var heading = new UILabel
             {
                 TranslatesAutoresizingMaskIntoConstraints = false,
@@ -69,6 +76,22 @@ namespace vault.iOS
             }
 
             var navigationController = new UINavigationController(instagramViewController)
+            {
+                ModalPresentationStyle = UIModalPresentationStyle.FullScreen
+            };
+            PresentViewController(navigationController, true, null);
+        }
+
+        private void OpenInstagramAnalysisSettings()
+        {
+            var settingsViewController = new InstagramAnalysisSettingsViewController();
+            if (NavigationController != null)
+            {
+                NavigationController.PushViewController(settingsViewController, true);
+                return;
+            }
+
+            var navigationController = new UINavigationController(settingsViewController)
             {
                 ModalPresentationStyle = UIModalPresentationStyle.FullScreen
             };

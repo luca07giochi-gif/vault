@@ -23,12 +23,28 @@ namespace vault.iOS.Shared
 
         public static IReadOnlyList<RecentVaultRecord> LoadAppManagedVaults()
         {
-            string? json = NSUserDefaults.StandardUserDefaults.StringForKey(AppDefaultsKey);
-            return DeserializeVaults(json);
+            using (NSUserDefaults? sharedDefaults = TryGetSharedDefaults())
+            {
+                string? sharedJson = sharedDefaults?.StringForKey(AppDefaultsKey);
+                if (sharedJson != null)
+                    return DeserializeVaults(sharedJson);
+            }
+
+            // Read the app's older private preference entry so existing vaults migrate
+            // to the app-group registry the next time they are published.
+            string? legacyJson = NSUserDefaults.StandardUserDefaults.StringForKey(AppDefaultsKey);
+            return DeserializeVaults(legacyJson);
         }
 
         public static IReadOnlyList<RecentVaultRecord> LoadPublishedVaults()
         {
+            using (NSUserDefaults? sharedDefaults = TryGetSharedDefaults())
+            {
+                string? sharedJson = sharedDefaults?.StringForKey(AppDefaultsKey);
+                if (!string.IsNullOrWhiteSpace(sharedJson))
+                    return DeserializeVaults(sharedJson);
+            }
+
             try
             {
                 string? namedJson = TryReadJsonFromPasteboard(TryGetNamedPasteboard(create: false), allowPlainString: true);
@@ -177,6 +193,12 @@ namespace vault.iOS.Shared
             defaults.SetString(json, AppDefaultsKey);
             defaults.Synchronize();
 
+            using (NSUserDefaults? sharedDefaults = TryGetSharedDefaults())
+            {
+                sharedDefaults?.SetString(json, AppDefaultsKey);
+                sharedDefaults?.Synchronize();
+            }
+
             SavePublishedVaults(normalized);
         }
 
@@ -185,6 +207,12 @@ namespace vault.iOS.Shared
             try
             {
                 string json = SerializeVaults(vaults);
+                using (NSUserDefaults? sharedDefaults = TryGetSharedDefaults())
+                {
+                    sharedDefaults?.SetString(json, AppDefaultsKey);
+                    sharedDefaults?.Synchronize();
+                }
+
                 UIPasteboard? pasteboard = TryGetNamedPasteboard(create: true);
                 if (pasteboard == null)
                 {
@@ -201,6 +229,18 @@ namespace vault.iOS.Shared
             catch
             {
                 // Best effort publish.
+            }
+        }
+
+        private static NSUserDefaults? TryGetSharedDefaults()
+        {
+            try
+            {
+                return new NSUserDefaults(AppGroupConfig.Identifier, NSUserDefaultsType.SuiteName);
+            }
+            catch
+            {
+                return null;
             }
         }
 

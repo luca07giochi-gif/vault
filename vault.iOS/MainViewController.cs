@@ -1318,7 +1318,7 @@ namespace vault.iOS
 
             _pathTitleButton = new UIButton(UIButtonType.System);
 
-            _pathTitleButton.SetTitle("Cassaforte iOS", UIControlState.Normal);
+            _pathTitleButton.SetTitle("LucApp", UIControlState.Normal);
 
             _pathTitleButton.TitleLabel!.Font = UIFont.SystemFontOfSize(17, UIFontWeight.Semibold);
 
@@ -1368,7 +1368,7 @@ namespace vault.iOS
 
                 ? (string.IsNullOrWhiteSpace(_currentFolder) ? "/" : $"/{_currentFolder}")
 
-                : "Cassaforte iOS";
+                : "LucApp";
 
 
 

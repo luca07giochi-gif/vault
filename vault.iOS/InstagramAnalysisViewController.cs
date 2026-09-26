@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using CoreGraphics;
 using Foundation;
 using UIKit;
@@ -151,6 +152,19 @@ namespace vault.iOS
             try
             {
                 var result = await _analysisService.AnalyzeFromZipAsync(fileUrl);
+                var excludedUsernames = new HashSet<string>(
+                    InstagramExcludedUserStore.Load(),
+                    StringComparer.OrdinalIgnoreCase);
+                result.Following = result.Following
+                    .Where(user => !excludedUsernames.Contains(user.Username))
+                    .ToList();
+                var followerUsernames = new HashSet<string>(
+                    result.Followers.Select(user => user.Username),
+                    StringComparer.OrdinalIgnoreCase);
+                result.NotFollowingBack = result.Following
+                    .Where(user => !followerUsernames.Contains(user.Username))
+                    .ToList();
+
                 BeginInvokeOnMainThread(() =>
                 {
                     _followers = result.Followers;
