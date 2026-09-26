@@ -35,14 +35,31 @@ namespace vault.iOS.ShareExtension
         {
             base.ViewDidLoad();
 
-            BuildUi();
-            LoadRecentVaults();
+            try
+            {
+                BuildUi();
+                LoadRecentVaults();
+            }
+            catch (Exception ex)
+            {
+                ShowStartupError(ex);
+            }
         }
 
         public override void ViewWillAppear(bool animated)
         {
             base.ViewWillAppear(animated);
-            LoadRecentVaults();
+            if (_summaryLabel == null)
+                return;
+
+            try
+            {
+                LoadRecentVaults();
+            }
+            catch (Exception ex)
+            {
+                ShowStartupError(ex);
+            }
         }
 
         private void BuildUi()
@@ -156,13 +173,13 @@ namespace vault.iOS.ShareExtension
                 buttonStack.BottomAnchor.ConstraintEqualTo(View.SafeAreaLayoutGuide.BottomAnchor, -18f),
                 buttonStack.HeightAnchor.ConstraintEqualTo(46f),
 
-                _busyIndicator.TopAnchor.ConstraintEqualTo(buttonStack.BottomAnchor, 12f),
                 _busyIndicator.CenterXAnchor.ConstraintEqualTo(View.CenterXAnchor),
+                _busyIndicator.CenterYAnchor.ConstraintEqualTo(View.CenterYAnchor, -18f),
 
                 _busyLabel.TopAnchor.ConstraintEqualTo(_busyIndicator.BottomAnchor, 6f),
-                _busyLabel.LeadingAnchor.ConstraintEqualTo(titleLabel.LeadingAnchor),
-                _busyLabel.TrailingAnchor.ConstraintEqualTo(titleLabel.TrailingAnchor),
-                _busyLabel.BottomAnchor.ConstraintLessThanOrEqualTo(View.SafeAreaLayoutGuide.BottomAnchor, -6f)
+                _busyLabel.CenterXAnchor.ConstraintEqualTo(View.CenterXAnchor),
+                _busyLabel.LeadingAnchor.ConstraintGreaterThanOrEqualTo(titleLabel.LeadingAnchor),
+                _busyLabel.TrailingAnchor.ConstraintLessThanOrEqualTo(titleLabel.TrailingAnchor)
             });
 
             NSLayoutConstraint.ActivateConstraints(new[]
@@ -171,6 +188,52 @@ namespace vault.iOS.ShareExtension
                 _emptyLabel.CenterYAnchor.ConstraintEqualTo(_emptyStateView.CenterYAnchor),
                 _emptyLabel.LeadingAnchor.ConstraintGreaterThanOrEqualTo(_emptyStateView.LeadingAnchor, 24f),
                 _emptyLabel.TrailingAnchor.ConstraintLessThanOrEqualTo(_emptyStateView.TrailingAnchor, -24f)
+            });
+        }
+
+        private void ShowStartupError(Exception exception)
+        {
+            UIView? view = View;
+            if (view == null)
+                return;
+
+            _summaryLabel = null;
+            _emptyLabel = null;
+            _emptyStateView = null;
+            _tableView = null;
+            _confirmButton = null;
+            _cancelButton = null;
+            _busyIndicator = null;
+            _busyLabel = null;
+
+            foreach (UIView subview in view.Subviews.ToArray())
+                subview.RemoveFromSuperview();
+
+            view.BackgroundColor = BackgroundColor;
+
+            UILabel messageLabel = new()
+            {
+                TranslatesAutoresizingMaskIntoConstraints = false,
+                Text = $"LucApp non è riuscita ad aprire la condivisione.\n{exception.Message}",
+                TextColor = PrimaryTextColor,
+                Font = UIFont.SystemFontOfSize(16f),
+                Lines = 0,
+                TextAlignment = UITextAlignment.Center
+            };
+
+            UIButton closeButton = UIButton.FromType(UIButtonType.System);
+            closeButton.TranslatesAutoresizingMaskIntoConstraints = false;
+            closeButton.SetTitle("Chiudi", UIControlState.Normal);
+            closeButton.TouchUpInside += (_, _) => CancelAndClose();
+
+            view.AddSubviews(messageLabel, closeButton);
+            NSLayoutConstraint.ActivateConstraints(new[]
+            {
+                messageLabel.CenterYAnchor.ConstraintEqualTo(view.CenterYAnchor, -24f),
+                messageLabel.LeadingAnchor.ConstraintEqualTo(view.SafeAreaLayoutGuide.LeadingAnchor, 24f),
+                messageLabel.TrailingAnchor.ConstraintEqualTo(view.SafeAreaLayoutGuide.TrailingAnchor, -24f),
+                closeButton.TopAnchor.ConstraintEqualTo(messageLabel.BottomAnchor, 20f),
+                closeButton.CenterXAnchor.ConstraintEqualTo(view.CenterXAnchor)
             });
         }
 

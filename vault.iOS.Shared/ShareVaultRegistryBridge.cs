@@ -1,8 +1,6 @@
-using System.Text;
 using System.Text.Json;
 
 using Foundation;
-using UIKit;
 
 namespace vault.iOS.Shared
 {
@@ -10,9 +8,6 @@ namespace vault.iOS.Shared
     {
         private const int SchemaVersion = 1;
         private const string AppDefaultsKey = "vault.share.registry.v1";
-        private const string PasteboardName = "com.luca07giochi.vaultios.share.registry";
-        private const string PasteboardType = "com.luca07giochi.vaultios.share.registry+json";
-        private static readonly NSString PasteboardTypeKey = new(PasteboardType);
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -45,22 +40,7 @@ namespace vault.iOS.Shared
                     return DeserializeVaults(sharedJson);
             }
 
-            try
-            {
-                string? namedJson = TryReadJsonFromPasteboard(TryGetNamedPasteboard(create: false), allowPlainString: true);
-                if (!string.IsNullOrWhiteSpace(namedJson))
-                    return DeserializeVaults(namedJson);
-
-                string? generalJson = TryReadJsonFromPasteboard(UIPasteboard.General, allowPlainString: false);
-                if (!string.IsNullOrWhiteSpace(generalJson))
-                    return DeserializeVaults(generalJson);
-            }
-            catch
-            {
-                // Ignore and fall back to empty.
-            }
-
-            return Array.Empty<RecentVaultRecord>();
+            return LoadAppManagedVaults();
         }
 
         public static IReadOnlyList<RecentVaultRecord> LoadPublishedVaultsMergedWithLocalVaults()
@@ -212,23 +192,10 @@ namespace vault.iOS.Shared
                     sharedDefaults?.SetString(json, AppDefaultsKey);
                     sharedDefaults?.Synchronize();
                 }
-
-                UIPasteboard? pasteboard = TryGetNamedPasteboard(create: true);
-                if (pasteboard == null)
-                {
-                    TrySaveToGeneralPasteboard(json);
-                    return;
-                }
-
-                pasteboard.String = json;
-                NSData data = NSData.FromArray(Encoding.UTF8.GetBytes(json));
-                pasteboard.SetData(data, PasteboardType);
-
-                TrySaveToGeneralPasteboard(json);
             }
             catch
             {
-                // Best effort publish.
+                // The app-local registry remains available if the shared group cannot be written.
             }
         }
 
@@ -241,69 +208,6 @@ namespace vault.iOS.Shared
             catch
             {
                 return null;
-            }
-        }
-
-        private static UIPasteboard? TryGetNamedPasteboard(bool create)
-        {
-            try
-            {
-                UIPasteboard? pasteboard = UIPasteboard.FromName(PasteboardName, create);
-                return pasteboard;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static string? TryReadJsonFromPasteboard(UIPasteboard? pasteboard, bool allowPlainString)
-        {
-            if (pasteboard == null)
-                return null;
-
-            if (allowPlainString && !string.IsNullOrWhiteSpace(pasteboard.String))
-                return pasteboard.String;
-
-            foreach (NSDictionary item in pasteboard.Items?.OfType<NSDictionary>().Reverse() ?? Enumerable.Empty<NSDictionary>())
-            {
-                NSObject? raw = item.ObjectForKey(PasteboardTypeKey);
-                string? decoded = DecodeJsonPayload(raw);
-                if (!string.IsNullOrWhiteSpace(decoded))
-                    return decoded;
-            }
-
-            return DecodeJsonPayload(pasteboard.GetValue(PasteboardType));
-        }
-
-        private static string? DecodeJsonPayload(NSObject? raw)
-        {
-            if (raw is NSString text)
-                return text.ToString();
-
-            if (raw is NSData data)
-                return NSString.FromData(data, NSStringEncoding.UTF8)?.ToString();
-
-            return null;
-        }
-
-        private static void TrySaveToGeneralPasteboard(string json)
-        {
-            try
-            {
-                UIPasteboard pasteboard = UIPasteboard.General;
-                List<NSDictionary> items = pasteboard.Items?.OfType<NSDictionary>()
-                    .Where(item => item.ObjectForKey(PasteboardTypeKey) == null)
-                    .ToList()
-                    ?? new List<NSDictionary>();
-
-                NSDictionary bridgeItem = NSDictionary.FromObjectAndKey(new NSString(json), PasteboardTypeKey);
-                items.Add(bridgeItem);
-                pasteboard.Items = items.ToArray();
-            }
-            catch
-            {
-                // Best effort fallback.
             }
         }
 
