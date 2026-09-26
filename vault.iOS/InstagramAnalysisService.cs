@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Foundation;
@@ -11,9 +12,31 @@ namespace vault.iOS
 {
     public class InstagramAnalysisService
     {
+        private const string ConnectionsPath = "connections/followers_and_following/";
+
+        private static readonly Regex FollowersFileRegex = new(
+            @"^connections/followers_and_following/followers(?:_\d+)?\.html$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static readonly Regex HrefRegex = new(
+            "<a\\b[^>]*\\bhref\\s*=\\s*[\\\"'](?<href>[^\\\"']+)[\\\"'][^>]*>",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static readonly Regex HtmlTagRegex = new(
+            "<[^>]+>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        private static readonly Regex WhitespaceRegex = new(
+            @"\s+", RegexOptions.CultureInvariant);
+
+        private static readonly HashSet<string> HeaderLabels = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "followers", "following", "follower", "seguaci", "seguiti", "seguito", "segui"
+        };
+
         public class InstagramUser
         {
             public string Username { get; set; } = string.Empty;
+
             public string InstagramUrl => $"https://www.instagram.com/{Username}/";
         }
 
@@ -26,218 +49,144 @@ namespace vault.iOS
 
         public async Task<AnalysisResult> AnalyzeFromZipAsync(NSUrl zipUrl)
         {
-            return await Task.Run(() =>
-            {
-                var result = new AnalysisResult();
+            if (zipUrl == null)
+                throw new ArgumentNullException(nameof(zipUrl));
 
-                try
-                {
-                    // Try to get the file path with better error handling
-                    string? zipPath = null;
-                    try
-                    {
-                        zipPath = zipUrl.Path;
-                    }
-                    catch (Exception ex)
-                    {
-                        System.Diagnostics.Debug.WriteLine($"Error getting file path: {ex.Message}");
-                        return result;
-                    }
+            string? zipPath = zipUrl.Path;
+            if (string.IsNullOrWhiteSpace(zipPath))
+                throw new InvalidDataException("Il file selezionato non ha un percorso valido.");
 
-                    if (string.IsNullOrEmpty(zipPath))
-                    {
-                        System.Diagnostics.Debug.WriteLine("File path is null or empty");
-                        return result;
-                    }
-
-                    if (!File.Exists(zipPath))
-                    {
-                        System.Diagnostics.Debug.WriteLine($"File does not exist: {zipPath}");
-                        return result;
-                    }
-
-                    using (var archive = ZipFile.OpenRead(zipPath))
-                    {
-                        string followersHtml = ExtractHtmlFromZip(archive, "connections/followers_and_following/followers_1.html");
-                        string followingHtml = ExtractHtmlFromZip(archive, "connections/followers_and_following/following.html");
-
-                        if (!string.IsNullOrEmpty(followersHtml))
-                            result.Followers = ParseInstagramHtml(followersHtml).OrderBy(u => u.Username).ToList();
-
-                        if (!string.IsNullOrEmpty(followingHtml))
-                            result.Following = ParseInstagramHtml(followingHtml).OrderBy(u => u.Username).ToList();
-
-                        // Find users who we follow but don't follow us back
-                        var followersSet = new HashSet<string>(result.Followers.Select(u => u.Username.ToLower()));
-                        result.NotFollowingBack = result.Following
-                            .Where(u => !followersSet.Contains(u.Username.ToLower()))
-                            .OrderBy(u => u.Username)
-                            .ToList();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Error analyzing Instagram data: {ex.Message}");
-                    System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
-                }
-
-                return result;
-            });
-        }
-
-        private string ExtractHtmlFromZip(ZipArchive archive, string entryPath)
-        {
+            bool hasSecurityScope = zipUrl.StartAccessingSecurityScopedResource();
             try
             {
-                var entry = archive.GetEntry(entryPath);
-                if (entry == null)
-                    return string.Empty;
-
-                using (var reader = new StreamReader(entry.Open()))
-                {
-                    return reader.ReadToEnd();
-                }
+                return await Task.Run(() => AnalyzeFromZipPath(zipPath));
             }
-            catch (Exception ex)
+            finally
             {
-                System.Diagnostics.Debug.WriteLine($"Error extracting {entryPath}: {ex.Message}");
-                return string.Empty;
+                if (hasSecurityScope)
+                    zipUrl.StopAccessingSecurityScopedResource();
             }
         }
 
-        private List<InstagramUser> ParseInstagramHtml(string htmlContent)
+        private static AnalysisResult AnalyzeFromZipPath(string zipPath)
         {
-            var users = new List<InstagramUser>();
+            if (!File.Exists(zipPath))
+                throw new FileNotFoundException("Il file selezionato non è disponibile.", zipPath);
 
-            if (string.IsNullOrWhiteSpace(htmlContent))
-                return users;
+            using var archive = ZipFile.OpenRead(zipPath);
+            var followersFiles = archive.Entries
+                .Where(entry => FollowersFileRegex.IsMatch(entry.FullName.Replace('\\', '/')))
+                .OrderBy(entry => entry.FullName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
 
-            try
+            var followingFile = archive.GetEntry(ConnectionsPath + "following.html");
+            if (followersFiles.Count == 0 || followingFile == null)
             {
-                var usernameSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-                // Use regex to extract usernames from anchor tags
-                var anchorRegex = new Regex(@"<a[^>]+href=""https://www\.instagram\.com/([^""]+)""[^>]*>([^<]+)</a>", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-                var matches = anchorRegex.Matches(htmlContent);
-
-                foreach (Match match in matches)
-                {
-                    var username = match.Groups[1].Value?.Trim();
-                    if (!string.IsNullOrWhiteSpace(username) && IsValidInstagramUsername(username))
-                    {
-                        usernameSet.Add(username);
-                    }
-                }
-
-                foreach (var username in usernameSet.OrderBy(u => u, StringComparer.OrdinalIgnoreCase))
-                {
-                    users.Add(new InstagramUser { Username = username });
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error parsing HTML: {ex.Message}");
+                throw new InvalidDataException(
+                    "Lo ZIP non contiene le liste followers e following dell'esportazione Instagram.");
             }
 
-            return users;
-        }
+            var followers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in followersFiles)
+                followers.UnionWith(ParseInstagramHtml(ReadEntry(entry)));
 
-        private IEnumerable<string> ExtractUsernamesFromAnchors(string htmlContent)
-        {
-            var hrefRegex = new Regex(@"<a[^>]+href=""(?<href>[^""]+)""", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-            var matches = hrefRegex.Matches(htmlContent);
-
-            foreach (Match match in matches)
+            var following = ParseInstagramHtml(ReadEntry(followingFile));
+            var result = new AnalysisResult
             {
-                var href = match.Groups["href"].Value?.Trim();
-                if (string.IsNullOrWhiteSpace(href))
-                    continue;
-
-                var normalizedHref = href.Split('?', 2)[0].Split('#', 2)[0];
-                if (!normalizedHref.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-                    !normalizedHref.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (!normalizedHref.Contains("instagram.com", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                string path;
-                try
-                {
-                    path = new Uri(normalizedHref).AbsolutePath;
-                }
-                catch
-                {
-                    path = normalizedHref;
-                }
-
-                path = path.Trim('/');
-                if (path.StartsWith("_u/", StringComparison.OrdinalIgnoreCase))
-                {
-                    path = path.Substring(3);
-                }
-
-                path = path.Split('/', 2)[0].Trim();
-                if (string.IsNullOrWhiteSpace(path))
-                    continue;
-
-                yield return path;
-            }
-        }
-
-        private IEnumerable<string> ExtractUsernamesFromText(string htmlContent)
-        {
-            var cleaned = Regex.Replace(htmlContent, "<[^>]+>", " ", RegexOptions.IgnoreCase | RegexOptions.Multiline);
-            cleaned = Regex.Replace(cleaned, "&nbsp;", " ", RegexOptions.IgnoreCase);
-            cleaned = Regex.Replace(cleaned, "\\s+", "\n", RegexOptions.Multiline);
-
-            var headerLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "followers",
-                "following",
-                "follower",
-                "seguaci",
-                "seguiti",
-                "seguito",
-                "segui"
+                Followers = ToUsers(followers),
+                Following = ToUsers(following),
+                NotFollowingBack = ToUsers(following.Where(username => !followers.Contains(username)))
             };
 
-            foreach (var line in cleaned.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+            return result;
+        }
+
+        private static string ReadEntry(ZipArchiveEntry entry)
+        {
+            using var stream = entry.Open();
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            return reader.ReadToEnd();
+        }
+
+        private static List<string> ParseInstagramHtml(string htmlContent)
+        {
+            var usernames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (Match match in HrefRegex.Matches(htmlContent))
             {
-                var value = line.Trim();
-                if (string.IsNullOrWhiteSpace(value))
-                    continue;
+                string href = System.Net.WebUtility.HtmlDecode(match.Groups["href"].Value).Trim();
+                if (TryGetUsernameFromInstagramUrl(href, out string username))
+                    usernames.Add(username);
+            }
 
-                if (headerLabels.Contains(value))
-                    continue;
+            // Keep compatibility with export variants whose profile links aren't absolute URLs.
+            if (usernames.Count == 0)
+                usernames.UnionWith(ParseUsernamesFromText(htmlContent));
 
-                if (value.Equals("profiles you choose to see content from", StringComparison.OrdinalIgnoreCase))
-                    continue;
+            return usernames.OrderBy(username => username, StringComparer.OrdinalIgnoreCase).ToList();
+        }
 
-                if (IsValidInstagramUsername(value))
+        private static bool TryGetUsernameFromInstagramUrl(string href, out string username)
+        {
+            username = string.Empty;
+            if (!Uri.TryCreate(href, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) ||
+                (!uri.Host.Equals("instagram.com", StringComparison.OrdinalIgnoreCase) &&
+                 !uri.Host.Equals("www.instagram.com", StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            var pathParts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            int usernamePart = pathParts.Length > 0 && pathParts[0].Equals("_u", StringComparison.OrdinalIgnoreCase)
+                ? 1
+                : 0;
+
+            if (pathParts.Length <= usernamePart)
+                return false;
+
+            string candidate = Uri.UnescapeDataString(pathParts[usernamePart]);
+            if (!IsValidInstagramUsername(candidate))
+                return false;
+
+            username = candidate;
+            return true;
+        }
+
+        private static IEnumerable<string> ParseUsernamesFromText(string htmlContent)
+        {
+            string text = System.Net.WebUtility.HtmlDecode(HtmlTagRegex.Replace(htmlContent, " "));
+            text = WhitespaceRegex.Replace(text, "\n");
+
+            foreach (string line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                string candidate = line.Trim();
+                if (HeaderLabels.Contains(candidate) ||
+                    candidate.Equals("profiles you choose to see content from", StringComparison.OrdinalIgnoreCase))
                 {
-                    yield return value;
+                    continue;
                 }
+
+                if (IsValidInstagramUsername(candidate))
+                    yield return candidate;
             }
         }
 
-        private bool IsValidInstagramUsername(string username)
+        private static List<InstagramUser> ToUsers(IEnumerable<string> usernames)
         {
-            if (string.IsNullOrWhiteSpace(username))
+            return usernames
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(username => username, StringComparer.OrdinalIgnoreCase)
+                .Select(username => new InstagramUser { Username = username })
+                .ToList();
+        }
+
+        private static bool IsValidInstagramUsername(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username) || username.Equals("_u", StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            if (username.Equals("_u", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            if (username.Contains("/", StringComparison.Ordinal))
-                return false;
-
-            if (username.Contains("?", StringComparison.Ordinal) || username.Contains("#", StringComparison.Ordinal))
-                return false;
-
-            return username.All(c => char.IsLetterOrDigit(c) || c == '.' || c == '_');
+            return username.All(character => char.IsLetterOrDigit(character) || character == '.' || character == '_');
         }
     }
 }
