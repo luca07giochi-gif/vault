@@ -226,8 +226,6 @@ namespace vault.iOS
 
         private UITabBarItem? _settingsTabItem;
 
-        private UITabBarItem? _extraTabItem;
-
         private UIView? _busyOverlay;
 
         private UIActivityIndicatorView? _busyIndicator;
@@ -660,7 +658,7 @@ namespace vault.iOS
 
             _extraButton.Layer.CornerRadius = 13f;
 
-            _extraButton.TouchUpInside += (_, _) => ShowExtraMenu();
+            _extraButton.TouchUpInside += (_, _) => OpenExtraSection();
 
             View.AddSubview(_extraButton);
 
@@ -1006,9 +1004,7 @@ namespace vault.iOS
 
             _renameTabItem = new UITabBarItem("Rimuovi", UIImage.GetSystemImage("trash"), 3);
 
-            _extraTabItem = new UITabBarItem("Extra", UIImage.GetSystemImage("star.fill"), 4);
-
-            _settingsTabItem = new UITabBarItem("Impostazioni", UIImage.GetSystemImage("gearshape"), 5);
+            _settingsTabItem = new UITabBarItem("Impostazioni", UIImage.GetSystemImage("gearshape"), 4);
 
 
 
@@ -1033,8 +1029,6 @@ namespace vault.iOS
                     _viewTabItem,
 
                     _renameTabItem,
-
-                    _extraTabItem,
 
                     _settingsTabItem
 
@@ -1083,18 +1077,6 @@ namespace vault.iOS
                 if (_session != null)
 
                     HandleMoveRequestFromBottomMenu();
-
-                return;
-
-            }
-
-
-
-            if (ReferenceEquals(item, _extraTabItem))
-
-            {
-
-                OpenInstagramAnalysis();
 
                 return;
 
@@ -2675,22 +2657,6 @@ namespace vault.iOS
             ConfigurePopover(sheet);
 
             PresentViewController(sheet, true, null);
-
-        }
-
-
-
-        private void OpenInstagramAnalysis()
-
-        {
-
-            var instagramController = new InstagramAnalysisViewController();
-
-            var navigationController = new UINavigationController(instagramController);
-
-            navigationController.ModalPresentationStyle = UIModalPresentationStyle.FormSheet;
-
-            PresentViewController(navigationController, true, null);
 
         }
 
@@ -5848,50 +5814,20 @@ namespace vault.iOS
 
 
 
-        private void ShowExtraMenu()
-
+        private void OpenExtraSection()
         {
+            var extraViewController = new ExtraViewController();
+            if (NavigationController != null)
+            {
+                NavigationController.PushViewController(extraViewController, true);
+                return;
+            }
 
-            UIAlertController sheet = UIAlertController.Create(
-
-                "Extra",
-
-                "Funzionalita aggiuntive",
-
-                UIAlertControllerStyle.ActionSheet);
-
-
-
-            sheet.AddAction(UIAlertAction.Create(
-
-                "Analisi Instagram",
-
-                UIAlertActionStyle.Default,
-
-                __ => ShowInstagramAnalysis()));
-
-
-
-            sheet.AddAction(UIAlertAction.Create("Annulla", UIAlertActionStyle.Cancel, null));
-
-            ConfigurePopover(sheet);
-
-            PresentViewController(sheet, true, null);
-
-        }
-
-
-
-        private void ShowInstagramAnalysis()
-
-        {
-
-            var instagramVC = new InstagramAnalysisViewController();
-
-            var navController = new UINavigationController(instagramVC);
-
-            PresentViewController(navController, true, null);
-
+            var navigationController = new UINavigationController(extraViewController)
+            {
+                ModalPresentationStyle = UIModalPresentationStyle.FullScreen
+            };
+            PresentViewController(navigationController, true, null);
         }
 
 
